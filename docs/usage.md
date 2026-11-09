@@ -18,6 +18,14 @@ Give the SQLite file and its directory permissions that match who should be able
 
 Run one collector process. It binds the UDP socket, creates or opens the SQLite database, and serves the UI API.
 
+The config file is `./vibecollector.toml` when that file is present. Otherwise the process uses built-in defaults. A missing default file is not an error. `-config PATH` selects a file. A missing file named by `-config` is a startup error.
+
+An unknown key is a startup error. A typo does not silently take effect.
+
+`http.listen` defaults to `127.0.0.1:8080`. `http.token` is required when the HTTP listen address is not loopback. Without it the process exits 2.
+
+If the config file mode is looser than `0600`, the process logs a warning and still starts.
+
 Configuration covers:
 
 - the UDP listen address and port (default port UDP 2055)
@@ -25,8 +33,6 @@ Configuration covers:
 - the HTTP listen address for the UI and API
 - which enrichment providers are enabled
 - how long raw flows and UI aggregates are kept
-
-The implementation plan specifies the configuration file and the process arguments. This guide will list those keys, defaults, and examples once that plan is approved, using the same names the daemon accepts.
 
 Until a provider client is implemented and enabled, GeoIP, ASN, and reputation stay empty. The collector still stores flows.
 
