@@ -1,0 +1,411 @@
+package decode_test
+
+import (
+	"encoding/binary"
+	"errors"
+	"net/netip"
+	"os"
+	"sync"
+	"testing"
+	"time"
+
+	"vibecollector/internal/decode"
+	"vibecollector/internal/decode/v5"
+	"vibecollector/internal/decode/v9"
+	"vibecollector/internal/flow"
+	"vibecollector/internal/ingest"
+	"vibecollector/internal/obs"
+	"vibecollector/internal/sampling"
+	"vibecollector/internal/sequence"
+	"vibecollector/internal/template"
+)
+
+func init() {
+	// v5 and v9 import decode for timestamps, so they register from init.
+	_ = v5.Parse
+	_ = v9.Parse
+}
+
+func TestNilSession(t *testing.T) {
+	templates, hold, samples, seq, counters := deps(t, 8, 4, 4)
+	if _, err := decode.NewSession(nil, hold, samples, seq, counters, 0, 0); !errors.Is(err, decode.ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := decode.NewSession(templates, nil, samples, seq, counters, 0, 0); !errors.Is(err, decode.ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := decode.NewSession(templates, hold, nil, seq, counters, 0, 0); !errors.Is(err, decode.ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := decode.NewSession(templates, hold, samples, nil, counters, 0, 0); !errors.Is(err, decode.ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := decode.NewSession(templates, hold, samples, seq, nil, 0, 0); !errors.Is(err, decode.ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := decode.NewSession(templates, hold, samples, seq, counters, 0, 0); err != nil {
+		t.Fatal(err)
+	}
+}
+
+func TestDispatchUnknownAndV5(t *testing.T) {
+	s, _, _, _, _, counters := session(t, 8, 8, 8)
+	at := time.Unix(1_700_000_000, 0).UTC()
+	ip := netip.MustParseAddr("192.0.2.5")
+	_, delta := s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x0a}, Src: ip, ReceivedAt: at})
+	if delta.Version != 0 || delta.Domain != 0 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != 1 {
+		t.Fatal(delta)
+	}
+	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0}, Src: ip, ReceivedAt: at})
+	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 2 {
+		t.Fatal(delta, counters.Snapshot()[obs.Malformed])
+	}
+	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0, 7}, Src: ip, ReceivedAt: at})
+	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 3 {
+		t.Fatal(delta)
+	}
+	v5pkt := make([]byte, 24+48)
+	binary.BigEndian.PutUint16(v5pkt[0:2], 5)
+	binary.BigEndian.PutUint16(v5pkt[2:4], 1)
+	binary.BigEndian.PutUint32(v5pkt[8:12], 1_700_000_000)
+	v5pkt[20], v5pkt[21] = 1, 2
+	binary.BigEndian.PutUint16(v5pkt[22:24], 0xC064)
+	binary.BigEndian.PutUint32(v5pkt[24+16:24+20], 42)
+	flows, delta := s.Accept(ingest.Datagram{Payload: v5pkt, Src: ip, ReceivedAt: at})
+	if delta.Version != 5 || delta.Domain != 258 || len(flows) != 1 || flows[0].Packets != 42 || !flows[0].Sampled {
+		t.Fatalf("delta %+v flows %d", delta, len(flows))
+	}
+	if flows[0].SamplingInterval == nil || *flows[0].SamplingInterval != 100 {
+		t.Fatal(flows[0].SamplingInterval)
+	}
+	short := make([]byte, 24)
+	copy(short, v5pkt[:24])
+	before := counters.Snapshot()[obs.Malformed]
+	_, delta = s.Accept(ingest.Datagram{Payload: short, Src: ip, ReceivedAt: at})
+	if delta.Version != 5 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != before+1 {
+		t.Fatal("short v5 counted twice", delta, counters.Snapshot()[obs.Malformed], before)
+	}
+}
+
+func TestDataBeforeTemplateDrains(t *testing.T) {
+	s, templates, hold, _, _, counters := session(t, 64, 256, 4096)
+	pkts := framed(t, "v9_data_before_template.bin")
+	ip := netip.MustParseAddr("192.0.2.8")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	flows, delta := s.Accept(ingest.Datagram{Payload: pkts[0], Src: ip, ReceivedAt: at})
+	if len(flows) != 0 || delta.MissingTemplate != 1 || len(hold.List(ip)) != 1 {
+		t.Fatalf("flows %d missing %d hold %d", len(flows), delta.MissingTemplate, len(hold.List(ip)))
+	}
+	flows, delta = s.Accept(ingest.Datagram{Payload: pkts[1], Src: ip, ReceivedAt: at})
+	if len(flows) != 1 || flows[0].Packets != 9 || flows[0].Src.String() != "203.0.113.10" || len(hold.List(ip)) != 0 {
+		t.Fatalf("flows %d hold %d delta %+v", len(flows), len(hold.List(ip)), delta)
+	}
+	if counters.Snapshot()[obs.MissingTemplate] != 1 || counters.Snapshot()[obs.DroppedTemplate] != 0 {
+		t.Fatal(counters.Snapshot())
+	}
+	if counters.Snapshot()[obs.SequenceDuplicate] != 0 {
+		t.Fatal("retry observed again")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: ip, Domain: 4, Version: 9, ID: 256}); !ok {
+		t.Fatal("template")
+	}
+	if !flows[0].Start.Equal(at) || !flows[0].End.Equal(at) || flows[0].TimeSource != flow.TimeSysUpTime {
+		t.Fatal(flows[0].Start, flows[0].End, flows[0].TimeSource)
+	}
+}
+
+func TestHoldFullDroppedTemplate(t *testing.T) {
+	s, _, hold, _, _, counters := session(t, 64, 256, 4096)
+	ip := netip.MustParseAddr("192.0.2.20")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	for i := 0; i < 257; i++ {
+		s.Accept(ingest.Datagram{Payload: dataOnly(uint32(i), uint32(i+1)), Src: ip, ReceivedAt: at})
+	}
+	if counters.Snapshot()[obs.DroppedTemplate] != 1 || counters.Snapshot()[obs.MissingTemplate] != 257 {
+		t.Fatal(counters.Snapshot()[obs.DroppedTemplate], counters.Snapshot()[obs.MissingTemplate])
+	}
+	entries := hold.List(ip)
+	if len(entries) != 256 {
+		t.Fatal(len(entries))
+	}
+	if binary.BigEndian.Uint32(entries[0].Payload[32:36]) != 2 || binary.BigEndian.Uint32(entries[255].Payload[32:36]) != 257 {
+		t.Fatal("oldest datagram was not the one dropped")
+	}
+	flows, _ := s.Accept(ingest.Datagram{Payload: templatePacket(4, 257, 256), Src: ip, ReceivedAt: at})
+	if len(flows) != 256 || flows[0].Packets != 2 || flows[255].Packets != 257 {
+		t.Fatalf("drained %d %v", len(flows), packetsOf(flows))
+	}
+	if len(hold.List(ip)) != 0 {
+		t.Fatal("hold not empty")
+	}
+}
+
+func TestPartialEmitRetriesSuffix(t *testing.T) {
+	s, _, hold, _, _, counters := session(t, 64, 16, 16)
+	ip := netip.MustParseAddr("192.0.2.30")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: ip, ReceivedAt: at})
+	rec := func(pkts uint32) []byte {
+		b := make([]byte, 12)
+		binary.BigEndian.PutUint32(b[0:4], 0x0a000001)
+		binary.BigEndian.PutUint32(b[4:8], 0x0a000002)
+		binary.BigEndian.PutUint32(b[8:12], pkts)
+		return b
+	}
+	pkt := append(v9Header(3, 0, 1_700_000_000, 1, 1), flowSet(256, rec(1))...)
+	pkt = append(pkt, flowSet(999, rec(2))...)
+	pkt = append(pkt, flowSet(256, rec(3))...)
+	flows, _ := s.Accept(ingest.Datagram{Payload: pkt, Src: ip, ReceivedAt: at})
+	if len(flows) != 1 || flows[0].Packets != 1 {
+		t.Fatalf("first sight %v", flows)
+	}
+	entries := hold.List(ip)
+	if len(entries) != 1 || entries[0].RetryAt != 36 {
+		t.Fatalf("retry at %v", entries)
+	}
+	if counters.Snapshot()[obs.MissingTemplate] != 1 {
+		t.Fatal(counters.Snapshot()[obs.MissingTemplate])
+	}
+	flows, _ = s.Accept(ingest.Datagram{Payload: templatePacket(1, 2, 999), Src: ip, ReceivedAt: at})
+	if len(flows) != 2 || flows[0].Packets != 2 || flows[1].Packets != 3 {
+		t.Fatalf("retry %v", packetsOf(flows))
+	}
+	snap := counters.Snapshot()
+	if len(hold.List(ip)) != 0 || snap[obs.SequenceDuplicate] != 0 || snap[obs.MissingTemplate] != 1 || snap[obs.CountDisagrees] != 0 {
+		t.Fatal(snap)
+	}
+}
+
+func TestExpireIdle(t *testing.T) {
+	s, templates, hold, samples, _, counters := session(t, 64, 8, 8)
+	a := netip.MustParseAddr("192.0.2.40")
+	b := netip.MustParseAddr("192.0.2.50")
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: a, ReceivedAt: t0})
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: b, ReceivedAt: t0})
+	samples.Put(sampling.SampleKey{Exporter: a, Domain: 1, Scope: "device"}, sampling.Sample{N: 4, Sampled: true})
+	hold.Put(template.Pending{Exporter: a, Payload: []byte{1}, Version: 9})
+	if _, err := s.ExpireIdle(t0, 0); !errors.Is(err, decode.ErrBadTimeout) {
+		t.Fatal(err)
+	}
+	if _, err := s.ExpireIdle(t0, -time.Second); !errors.Is(err, decode.ErrBadTimeout) {
+		t.Fatal(err)
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); !ok {
+		t.Fatal("non-positive idle dropped")
+	}
+	if got, err := s.ExpireIdle(t0.Add(10*time.Minute), 30*time.Minute); err != nil || len(got) != 0 {
+		t.Fatal(got, err)
+	}
+	if got, err := s.ExpireIdle(t0.Add(30*time.Minute), 30*time.Minute); err != nil || len(got) != 0 {
+		t.Fatal("equal touch dropped", got, err)
+	}
+	got, err := s.ExpireIdle(t0.Add(30*time.Minute+time.Nanosecond), 30*time.Minute)
+	if err != nil || len(got) != 2 || got[0] != a || got[1] != b {
+		t.Fatal(got, err)
+	}
+	if counters.Snapshot()[obs.TemplateIdleExpired] != 0 {
+		t.Fatal("ExpireIdle incremented template_idle_expired")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); ok {
+		t.Fatal("template remains")
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); ok || len(hold.List(a)) != 0 {
+		t.Fatal("sample or hold remains")
+	}
+	before := counters.Snapshot()[obs.SequenceGapV9Packets]
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 50, 256), Src: a, ReceivedAt: t0.Add(time.Hour)})
+	if counters.Snapshot()[obs.SequenceGapV9Packets] != before {
+		t.Fatal("idle expiry left a gap")
+	}
+}
+
+func TestForeignEviction(t *testing.T) {
+	s, templates, hold, samples, _, counters := session(t, 1, 8, 8)
+	a := netip.MustParseAddr("192.0.2.10")
+	b := netip.MustParseAddr("192.0.2.11")
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: a, ReceivedAt: t0})
+	samples.Put(sampling.SampleKey{Exporter: a, Domain: 1, Scope: "device"}, sampling.Sample{N: 9, Sampled: true})
+	hold.Put(template.Pending{Exporter: a, Payload: []byte{9}, Version: 9, Domain: 1})
+	t1 := t0.Add(time.Minute)
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: b, ReceivedAt: t1})
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); !ok || len(hold.List(a)) != 1 {
+		t.Fatal("Accept locked the evicted exporter")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); ok {
+		t.Fatal("A template remains")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: b, Domain: 1, Version: 9, ID: 256}); !ok {
+		t.Fatal("B template missing")
+	}
+	if counters.Snapshot()[obs.TemplateEvicted] != 1 {
+		t.Fatal(counters.Snapshot()[obs.TemplateEvicted])
+	}
+	if _, err := s.ExpireIdle(t1, 0); !errors.Is(err, decode.ErrBadTimeout) {
+		t.Fatal(err)
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); !ok {
+		t.Fatal("zero idle dropped the recorded eviction")
+	}
+	got, err := s.ExpireIdle(t1, 30*time.Minute)
+	if err != nil || len(got) != 0 {
+		t.Fatal(got, err)
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); ok || len(hold.List(a)) != 0 {
+		t.Fatal("eviction was not dropped")
+	}
+	before := counters.Snapshot()[obs.SequenceGapV9Packets]
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 10, 300), Src: a, ReceivedAt: t1})
+	if counters.Snapshot()[obs.SequenceGapV9Packets] != before {
+		t.Fatal("evicted exporter was a gap")
+	}
+}
+
+func TestSelfEvictionRestoresTouch(t *testing.T) {
+	s, templates, hold, samples, _, counters := session(t, 1, 8, 8)
+	a := netip.MustParseAddr("192.0.2.12")
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: a, ReceivedAt: t0})
+	samples.Put(sampling.SampleKey{Exporter: a, Domain: 1, Scope: "device"}, sampling.Sample{N: 3, Sampled: true})
+	hold.Put(template.Pending{Exporter: a, Payload: []byte{1}, Version: 9})
+	t1 := t0.Add(time.Minute)
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 1, 257), Src: a, ReceivedAt: t1})
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); ok {
+		t.Fatal("old template")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 257}); !ok {
+		t.Fatal("new template")
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); ok || len(hold.List(a)) != 0 {
+		t.Fatal("self eviction left sampling or hold")
+	}
+	if counters.Snapshot()[obs.TemplateEvicted] != 1 {
+		t.Fatal(counters.Snapshot()[obs.TemplateEvicted])
+	}
+	if got, err := s.ExpireIdle(t1.Add(30*time.Minute), 30*time.Minute); err != nil || len(got) != 0 {
+		t.Fatal(got, err)
+	}
+	got, err := s.ExpireIdle(t1.Add(30*time.Minute+time.Nanosecond), 30*time.Minute)
+	if err != nil || len(got) != 1 || got[0] != a {
+		t.Fatal(got, err)
+	}
+}
+
+func TestParallelAccept(t *testing.T) {
+	s, templates, _, _, _, _ := session(t, 64, 8, 8)
+	a := netip.MustParseAddr("192.0.2.70")
+	b := netip.MustParseAddr("192.0.2.71")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	var wg sync.WaitGroup
+	start := make(chan struct{})
+	for _, ip := range []netip.Addr{a, b} {
+		wg.Add(1)
+		go func(ip netip.Addr) {
+			defer wg.Done()
+			<-start
+			s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: ip, ReceivedAt: at})
+		}(ip)
+	}
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(5 * time.Second):
+		t.Fatal("Accept deadlocked")
+	}
+	for _, ip := range []netip.Addr{a, b} {
+		if _, ok := templates.Get(template.Key{Exporter: ip, Domain: 1, Version: 9, ID: 256}); !ok {
+			t.Fatal(ip)
+		}
+	}
+}
+
+func deps(t *testing.T, cap, per, global int) (*template.Cache, *template.Hold, *sampling.Cache, *sequence.Table, *obs.Counters) {
+	t.Helper()
+	templates, err := template.NewCache(cap)
+	if err != nil {
+		t.Fatal(err)
+	}
+	hold, err := template.NewHold(per, global)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return templates, hold, sampling.NewCache(), sequence.NewTable(), obs.NewCounters()
+}
+
+func session(t *testing.T, cap, per, global int) (*decode.Session, *template.Cache, *template.Hold, *sampling.Cache, *sequence.Table, *obs.Counters) {
+	t.Helper()
+	templates, hold, samples, seq, counters := deps(t, cap, per, global)
+	s, err := decode.NewSession(templates, hold, samples, seq, counters, 2*time.Hour, 5*time.Second)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return s, templates, hold, samples, seq, counters
+}
+
+func framed(t *testing.T, name string) [][]byte {
+	t.Helper()
+	b, err := os.ReadFile("testdata/" + name)
+	if err != nil {
+		t.Fatal(err)
+	}
+	var out [][]byte
+	for len(b) > 0 {
+		n := binary.BigEndian.Uint32(b[:4])
+		b = b[4:]
+		out = append(out, append([]byte(nil), b[:n]...))
+		b = b[n:]
+	}
+	return out
+}
+
+func v9Header(count uint16, sysup, unixSecs, seq, source uint32) []byte {
+	b := make([]byte, 20)
+	binary.BigEndian.PutUint16(b[0:2], 9)
+	binary.BigEndian.PutUint16(b[2:4], count)
+	binary.BigEndian.PutUint32(b[4:8], sysup)
+	binary.BigEndian.PutUint32(b[8:12], unixSecs)
+	binary.BigEndian.PutUint32(b[12:16], seq)
+	binary.BigEndian.PutUint32(b[16:20], source)
+	return b
+}
+
+func flowSet(id uint16, body []byte) []byte {
+	b := make([]byte, 4+len(body))
+	binary.BigEndian.PutUint16(b[0:2], id)
+	binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
+	copy(b[4:], body)
+	return b
+}
+
+func templatePacket(domain, seq uint32, id uint16) []byte {
+	body := make([]byte, 16)
+	binary.BigEndian.PutUint16(body[0:2], id)
+	binary.BigEndian.PutUint16(body[2:4], 3)
+	pairs := []uint16{8, 4, 12, 4, 2, 4}
+	for i, v := range pairs {
+		binary.BigEndian.PutUint16(body[4+2*i:6+2*i], v)
+	}
+	return append(v9Header(1, 0, 1_700_000_000, seq, domain), flowSet(0, body)...)
+}
+
+func dataOnly(seq, pkts uint32) []byte {
+	rec := make([]byte, 12)
+	binary.BigEndian.PutUint32(rec[0:4], 0x0a000001)
+	binary.BigEndian.PutUint32(rec[4:8], 0x0a000002)
+	binary.BigEndian.PutUint32(rec[8:12], pkts)
+	return append(v9Header(1, 0, 1_700_000_000, seq, 4), flowSet(256, rec)...)
+}
+
+func packetsOf(flows []flow.Flow) []uint64 {
+	out := make([]uint64, len(flows))
+	for i, f := range flows {
+		out[i] = f.Packets
+	}
+	return out
+}

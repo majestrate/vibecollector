@@ -1,0 +1,103 @@
+{
+  "received_at": "2023-11-14T22:13:20Z",
+  "max_age": "2h",
+  "skew": "5s",
+  "exporter": "192.0.2.8",
+  "packets": [
+    {
+      "counters": {
+        "malformed": 0,
+        "missing_template": 0,
+        "count_disagrees": 0,
+        "padding_nonzero": 0,
+        "reserved_set": 0,
+        "non_flow_records": 1,
+        "sequence_gap_v9_packets": 0,
+        "sequence_duplicate": 0,
+        "sequence_reorder": 0,
+        "sequence_reset": 0,
+        "sequence_unresolved": 0,
+        "template_redefined": 0,
+        "template_evicted": 0,
+        "timestamp_skew": 0,
+        "timestamp_suspect": 0,
+        "clock_clamped": 0
+      },
+      "delta": {
+        "version": 9,
+        "domain": 1,
+        "packets": 1,
+        "flows": 0,
+        "malformed": 0,
+        "missing_template": 0,
+        "gap_flows": 0,
+        "gap_packets": 0,
+        "gap_records": 0
+      },
+      "flows": []
+    },
+    {
+      "counters": {
+        "malformed": 0,
+        "missing_template": 0,
+        "count_disagrees": 0,
+        "padding_nonzero": 0,
+        "reserved_set": 0,
+        "non_flow_records": 1,
+        "sequence_gap_v9_packets": 0,
+        "sequence_duplicate": 0,
+        "sequence_reorder": 0,
+        "sequence_reset": 0,
+        "sequence_unresolved": 0,
+        "template_redefined": 0,
+        "template_evicted": 0,
+        "timestamp_skew": 0,
+        "timestamp_suspect": 0,
+        "clock_clamped": 0
+      },
+      "delta": {
+        "version": 9,
+        "domain": 1,
+        "packets": 1,
+        "flows": 1,
+        "malformed": 0,
+        "missing_template": 0,
+        "gap_flows": 0,
+        "gap_packets": 0,
+        "gap_records": 0
+      },
+      "flows": [
+        {
+          "src": "203.0.113.10",
+          "dst": "198.51.100.20",
+          "nexthop": null,
+          "src_port": null,
+          "dst_port": null,
+          "proto": null,
+          "tcp_flags": null,
+          "tos": null,
+          "packets": 5,
+          "octets": 100,
+          "counter_semantics": "delta",
+          "octet_semantics": "ip",
+          "input_if": 7,
+          "output_if": null,
+          "bgp_src_as": null,
+          "bgp_dst_as": null,
+          "src_mask": null,
+          "dst_mask": null,
+          "sampled": true,
+          "sampling_interval": 100,
+          "sampling_algorithm": 1,
+          "domain": 1,
+          "version": 9,
+          "start": "2023-11-14T22:13:20Z",
+          "end": "2023-11-14T22:13:20Z",
+          "export": "2023-11-14T22:13:20Z",
+          "time_source": "sysuptime",
+          "clock_clamped": false
+        }
+      ]
+    }
+  ]
+}
