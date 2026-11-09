@@ -528,15 +528,7 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 	f.Domain = p.domain
 	f.Version = 9
 	f.ReceivedAt = p.d.ReceivedAt
-	// A missing switched field is the export time, not device millisecond 0.
-	first, last := p.sysUp, p.sysUp
-	if v.hasFirst {
-		first = v.first
-	}
-	if v.hasLast {
-		last = v.last
-	}
-	st := decode.ResolveSysUp(p.d.ReceivedAt, p.unixSecs, 0, p.sysUp, first, last, p.maxAge, p.skew)
+	st := decode.ResolveSysUp(p.d.ReceivedAt, p.unixSecs, 0, p.sysUp, v.first, v.last, v.hasFirst, v.hasLast, p.maxAge, p.skew)
 	f.ExportTime = st.Export
 	f.Start = st.Start
 	f.End = st.End

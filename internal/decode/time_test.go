@@ -98,7 +98,7 @@ func TestAbsMillisSuspect(t *testing.T) {
 func TestResolveEndBeforeStart(t *testing.T) {
 	export := time.Unix(1_700_000_000, 0).UTC()
 	// first age 0, last age 10s. Conversion yields end before start.
-	st := ResolveSysUp(export, uint32(export.Unix()), 0, 100_000, 100_000, 90_000, 2*time.Hour, 5*time.Second)
+	st := ResolveSysUp(export, uint32(export.Unix()), 0, 100_000, 100_000, 90_000, true, true, 2*time.Hour, 5*time.Second)
 	if st.Source != flow.TimeSysUpTime {
 		t.Fatalf("source %d", st.Source)
 	}
@@ -116,7 +116,7 @@ func TestResolveReceiveWindow(t *testing.T) {
 	skew := 5 * time.Second
 
 	aheadUnix := uint32(received.Add(10 * 365 * 24 * time.Hour).Unix())
-	st := ResolveSysUp(received, aheadUnix, 0, 10_000, 9_000, 10_000, maxAge, skew)
+	st := ResolveSysUp(received, aheadUnix, 0, 10_000, 9_000, 10_000, true, true, maxAge, skew)
 	hi := received.Add(skew)
 	if !st.ClockClamped || st.Clamped != 1 {
 		t.Fatalf("ahead clock %+v", st)
@@ -129,7 +129,7 @@ func TestResolveReceiveWindow(t *testing.T) {
 	}
 
 	behindUnix := uint32(received.Add(-10 * 365 * 24 * time.Hour).Unix())
-	st = ResolveSysUp(received, behindUnix, 0, 10_000, 9_000, 10_000, maxAge, skew)
+	st = ResolveSysUp(received, behindUnix, 0, 10_000, 9_000, 10_000, true, true, maxAge, skew)
 	lo := received.Add(-maxAge)
 	if !st.ClockClamped || !st.Start.Equal(lo) || !st.End.Equal(lo) {
 		t.Fatalf("behind %+v want %s", st, lo)
@@ -137,12 +137,12 @@ func TestResolveReceiveWindow(t *testing.T) {
 
 	// On the high edge: not clamped. One millisecond past it: clamped back.
 	edge := uint32(received.Add(skew).Unix())
-	st = ResolveSysUp(received, edge, 0, 10_000, 10_000, 10_000, maxAge, skew)
+	st = ResolveSysUp(received, edge, 0, 10_000, 10_000, 10_000, true, true, maxAge, skew)
 	if st.ClockClamped || !st.Start.Equal(received.Add(skew)) {
 		t.Fatalf("edge %+v", st)
 	}
 	past := received.Add(skew + time.Millisecond)
-	st = ResolveSysUp(received, uint32(past.Unix()), uint32(past.Nanosecond()), 0, 0, 0, maxAge, skew)
+	st = ResolveSysUp(received, uint32(past.Unix()), uint32(past.Nanosecond()), 0, 0, 0, true, true, maxAge, skew)
 	if !st.ClockClamped || !st.End.Equal(hi) {
 		t.Fatalf("past edge %+v", st)
 	}
@@ -151,7 +151,7 @@ func TestResolveReceiveWindow(t *testing.T) {
 func TestResolveSuspectDoesNotImplyClockClamp(t *testing.T) {
 	export := time.Unix(1_700_000_000, 0).UTC()
 	sys := uint32((3 * time.Hour) / time.Millisecond)
-	st := ResolveSysUp(export, uint32(export.Unix()), 0, sys, 0, 0, 2*time.Hour, 5*time.Second)
+	st := ResolveSysUp(export, uint32(export.Unix()), 0, sys, 0, 0, true, true, 2*time.Hour, 5*time.Second)
 	if st.Suspect != 2 || st.ClockClamped || st.Skew != 0 {
 		t.Fatalf("%+v", st)
 	}
@@ -165,7 +165,7 @@ func TestResolveSwapThenClamp(t *testing.T) {
 	received := time.Unix(1_700_000_000, 0).UTC()
 	ahead := uint32(received.Add(10 * 365 * 24 * time.Hour).Unix())
 	// After conversion end is 10s before start, then both sit far above the window.
-	st := ResolveSysUp(received, ahead, 0, 100_000, 100_000, 90_000, 2*time.Hour, 5*time.Second)
+	st := ResolveSysUp(received, ahead, 0, 100_000, 100_000, 90_000, true, true, 2*time.Hour, 5*time.Second)
 	hi := received.Add(5 * time.Second)
 	if st.Suspect != 1 || !st.ClockClamped || st.Clamped != 1 {
 		t.Fatalf("%+v", st)
@@ -177,7 +177,7 @@ func TestResolveSwapThenClamp(t *testing.T) {
 
 func TestResolveUnixSecsZero(t *testing.T) {
 	received := time.Unix(1_700_000_000, 0).UTC()
-	st := ResolveSysUp(received, 0, 0, 100, 50, 90_000, 2*time.Hour, 5*time.Second)
+	st := ResolveSysUp(received, 0, 0, 100, 50, 90_000, true, true, 2*time.Hour, 5*time.Second)
 	if st.Source != flow.TimeReceive {
 		t.Fatalf("source %d", st.Source)
 	}

@@ -130,7 +130,9 @@ func (s *Session) Accept(d ingest.Datagram) (flows []flow.Flow, delta flow.Expor
 // IP is a new stream and is not a gap. A non-positive idle returns
 // ErrBadTimeout and drops nothing, including recorded evictions.
 // ExpireIdle locks one exporter mutex at a time and releases it before taking
-// the next.
+// the next. That mutex is taken before the session mutex. A recorded IP is
+// dropped only when it is still in the eviction set, and an idle IP only when
+// its touch is still older than idle. The set is not cleared before those checks.
 func (s *Session) ExpireIdle(now time.Time, idle time.Duration) ([]netip.Addr, error) {
 	if idle <= 0 {
 		return nil, ErrBadTimeout
@@ -140,7 +142,6 @@ func (s *Session) ExpireIdle(now time.Time, idle time.Duration) ([]netip.Addr, e
 	for ip := range s.evict {
 		evicts = append(evicts, ip)
 	}
-	s.evict = make(map[netip.Addr]struct{})
 	s.mu.Unlock()
 
 	seen := make(map[netip.Addr]struct{}, len(evicts))
@@ -150,7 +151,7 @@ func (s *Session) ExpireIdle(now time.Time, idle time.Duration) ([]netip.Addr, e
 			continue
 		}
 		seen[ip] = struct{}{}
-		s.dropIP(ip)
+		s.dropRecorded(ip)
 	}
 	var idleIPs []netip.Addr
 	for _, ip := range s.templates.IdleExporters(now, idle) {
@@ -158,9 +159,9 @@ func (s *Session) ExpireIdle(now time.Time, idle time.Duration) ([]netip.Addr, e
 		if _, ok := seen[ip]; ok {
 			continue
 		}
-		seen[ip] = struct{}{}
-		s.dropIP(ip)
-		idleIPs = append(idleIPs, ip)
+		if s.dropIfIdle(ip, now, idle) {
+			idleIPs = append(idleIPs, ip)
+		}
 	}
 	sort.Slice(idleIPs, func(i, j int) bool { return idleIPs[i].Compare(idleIPs[j]) < 0 })
 	return idleIPs, nil
@@ -184,7 +185,7 @@ func (s *Session) applyEvictions(ip netip.Addr, at time.Time) (self bool) {
 		if ev == ip {
 			// Sampling and sequence were dropped when Put reported this IP.
 			s.noteHoldDrop(s.hold.DropExporter(ip))
-			// Put cleared this IP's touch while removing the old templates.
+			// The touch is the datagram time after the replay.
 			s.templates.Touch(ip, at)
 			self = true
 			continue
@@ -196,14 +197,50 @@ func (s *Session) applyEvictions(ip netip.Addr, at time.Time) (self bool) {
 	return self
 }
 
-func (s *Session) dropIP(ip netip.Addr) {
+// Exporter mutex before s.mu, matching Accept. The set entry may already be gone.
+func (s *Session) dropRecorded(ip netip.Addr) {
+	ip = ip.Unmap()
 	mu := s.mutexFor(ip)
 	mu.Lock()
+	defer mu.Unlock()
+	s.mu.Lock()
+	_, ok := s.evict[ip]
+	if ok {
+		delete(s.evict, ip)
+	}
+	s.mu.Unlock()
+	if !ok {
+		return
+	}
+	s.dropIP(ip)
+}
+
+// A datagram can refresh the touch while an earlier IP is dropped.
+func (s *Session) dropIfIdle(ip netip.Addr, now time.Time, idle time.Duration) bool {
+	ip = ip.Unmap()
+	mu := s.mutexFor(ip)
+	mu.Lock()
+	defer mu.Unlock()
+	still := false
+	for _, cand := range s.templates.IdleExporters(now, idle) {
+		if cand.Unmap() == ip {
+			still = true
+			break
+		}
+	}
+	if !still {
+		return false
+	}
+	s.dropIP(ip)
+	return true
+}
+
+// Caller holds the exporter mutex. The snapshot was rechecked under that lock.
+func (s *Session) dropIP(ip netip.Addr) {
 	s.templates.DropExporter(ip)
 	s.noteHoldDrop(s.hold.DropExporter(ip))
 	s.samples.DropExporter(ip)
 	s.seq.DropExporter(ip)
-	mu.Unlock()
 }
 
 func (s *Session) noteHoldDrop(n int) {

@@ -61,7 +61,8 @@ func AbsMillis(export time.Time, sysUpTime, switched uint32, maxAge, skew time.D
 // ClockClamped is true when Start or End was moved into the receive window.
 // Skew, Suspect, and Clamped are the process-counter deltas for this flow:
 // one per FlagSkew endpoint, one per FlagSuspect endpoint, one more Suspect
-// when End was before Start, and Clamped 1 when ClockClamped is set.
+// when both ends were present and End was before Start, and Clamped 1 when
+// ClockClamped is set.
 // ResolveSysUp does not return an error, and neither does Stamp.
 type Stamp struct {
 	Start, End   time.Time
@@ -78,12 +79,16 @@ type Stamp struct {
 // exportUnix and exportNsec are the header export clock. v9 passes nsec 0.
 // sysUpTime, first, and last are device milliseconds. maxAge and skew are
 // timestamp_max_age and timestamp_skew_slack.
+// hasFirst and hasLast are false when that switched field was absent.
 // When exportUnix is 0 the header clock is unusable: Source is TimeReceive
-// and both ends are received. Otherwise each end is AbsMillis, then swapped
-// if End is before Start, then clamped into
+// and both ends are received. Otherwise a present end is AbsMillis, including
+// a present 0. A missing end is the export time, set after that conversion,
+// so it does not swap with the real end or add a timestamp_suspect. When both
+// ends were present and End is before Start, they are swapped and Suspect
+// increases by one. Both ends are then clamped into
 // [received - maxAge, received + skew].
 // The result is the stamp to store. ResolveSysUp does not return an error.
-func ResolveSysUp(received time.Time, exportUnix, exportNsec, sysUpTime, first, last uint32, maxAge, skew time.Duration) Stamp {
+func ResolveSysUp(received time.Time, exportUnix, exportNsec, sysUpTime, first, last uint32, hasFirst, hasLast bool, maxAge, skew time.Duration) Stamp {
 	if exportUnix == 0 {
 		return Stamp{
 			Start:  received,
@@ -93,14 +98,20 @@ func ResolveSysUp(received time.Time, exportUnix, exportNsec, sysUpTime, first, 
 		}
 	}
 	export := time.Unix(int64(exportUnix), int64(exportNsec)).UTC()
-	start, startFlag := AbsMillis(export, sysUpTime, first, maxAge, skew)
-	end, endFlag := AbsMillis(export, sysUpTime, last, maxAge, skew)
+	start, end := export, export
+	var startFlag, endFlag TimeFlag
+	if hasFirst {
+		start, startFlag = AbsMillis(export, sysUpTime, first, maxAge, skew)
+	}
+	if hasLast {
+		end, endFlag = AbsMillis(export, sysUpTime, last, maxAge, skew)
+	}
 	var stamp Stamp
 	stamp.Export = export
 	stamp.Source = flow.TimeSysUpTime
 	stamp.Skew = flagCount(startFlag, FlagSkew) + flagCount(endFlag, FlagSkew)
 	stamp.Suspect = flagCount(startFlag, FlagSuspect) + flagCount(endFlag, FlagSuspect)
-	if end.Before(start) {
+	if hasFirst && hasLast && end.Before(start) {
 		start, end = end, start
 		stamp.Suspect++
 	}

@@ -121,7 +121,7 @@ func Parse(d ingest.Datagram, samples *sampling.Cache, seq *sequence.Table, coun
 		f.Domain = delta.Domain
 		f.Version = 5
 		f.ReceivedAt = d.ReceivedAt
-		stamp := decode.ResolveSysUp(d.ReceivedAt, unixSecs, unixNsecs, sysUp, firstOf(rec), lastOf(rec), maxAge, skew)
+		stamp := decode.ResolveSysUp(d.ReceivedAt, unixSecs, unixNsecs, sysUp, firstOf(rec), lastOf(rec), true, true, maxAge, skew)
 		f.ExportTime = stamp.Export
 		f.Start = stamp.Start
 		f.End = stamp.End

@@ -516,6 +516,27 @@ func TestMissingSwitchUsesExport(t *testing.T) {
 	}
 }
 
+func TestMissingFirstDoesNotSwap(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.8")
+	unix := uint32(1_700_000_000)
+	export := time.Unix(int64(unix), 0).UTC()
+	sysUp := uint32(3 * time.Hour / time.Millisecond)
+	counters := obs.NewCounters()
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {21, 4}})
+	rec := make([]byte, 12)
+	copy(rec[:8], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	binary.BigEndian.PutUint32(rec[8:12], sysUp-1000)
+	pkt := append(header(2, sysUp, unix, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, ip, export), mustCache(t), nil, nil, counters, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	if !flows[0].Start.Equal(export) || !flows[0].End.Equal(export.Add(-time.Second)) || counters.Snapshot()[obs.TimestampSuspect] != 0 {
+		t.Fatalf("missing first %s %s suspect %d", flows[0].Start, flows[0].End, counters.Snapshot()[obs.TimestampSuspect])
+	}
+}
+
 func TestWideFieldsAndUnmap(t *testing.T) {
 	body := templateBody(256, [][2]uint16{{27, 16}, {28, 16}, {1, 8}, {16, 4}})
 	rec := make([]byte, 16+16+8+4)
