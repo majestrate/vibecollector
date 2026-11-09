@@ -46,10 +46,11 @@ func (c *Cache) Put(key SampleKey, s Sample) {
 }
 
 // Lookup returns the first scope in scopes that is present for exporter and
-// domain. scopes is the parser's order: the data record's own fields are not
-// in the cache; the caller tries those first, then if:<input>, sampler:<id>,
-// linecard, cache, template, and device. ok is false when none match.
-// Exporter is unmapped. Lookup does not return an error.
+// domain, including a fact whose N is 0. scopes is the parser's order: the
+// data record's own fields are not in the cache; the caller tries those
+// first, then if:<input>, sampler:<id>, linecard, cache, template, and
+// device. ok is false when none match. Exporter is unmapped. Lookup does
+// not return an error.
 func (c *Cache) Lookup(exporter netip.Addr, domain uint32, scopes []string) (Sample, bool) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -61,6 +62,26 @@ func (c *Cache) Lookup(exporter netip.Addr, domain uint32, scopes []string) (Sam
 		}
 	}
 	return Sample{}, false
+}
+
+// Facts returns a copy of every fact stored for exporter and domain.
+// The map key is the scope string. Exporter is unmapped. Nothing stored
+// returns nil. Facts does not return an error.
+func (c *Cache) Facts(exporter netip.Addr, domain uint32) map[string]Sample {
+	c.mu.Lock()
+	defer c.mu.Unlock()
+	exporter = exporter.Unmap()
+	var out map[string]Sample
+	for k, s := range c.m {
+		if k.Exporter != exporter || k.Domain != domain {
+			continue
+		}
+		if out == nil {
+			out = make(map[string]Sample)
+		}
+		out[k.Scope] = s
+	}
+	return out
 }
 
 // DropExporter removes every fact for ip. Session calls it on idle expiry

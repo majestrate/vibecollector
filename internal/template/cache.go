@@ -109,8 +109,11 @@ func (c *Cache) Get(key Key) (Template, bool) {
 // is true. An identical retransmission returns changed false and is not logged.
 // When the insert would exceed the cap, Put first removes every template of
 // the exporter with the oldest Touch time and returns that IP in evicted.
-// evicted is invalid when nothing was evicted. Put does not drop hold,
-// sampling, or sequence state. The caller reads the same IP from TakeEvictions.
+// evicted is invalid when nothing was evicted. A missing Touch sorts as
+// oldest, so when the victim is the inserter Put sets that IP's Touch to
+// t.Received before it returns. Any other victim's Touch stays cleared.
+// Put does not drop hold, sampling, or sequence state. The caller reads
+// the same IP from TakeEvictions.
 // ErrBadKey means Version is not 9 or 10, or a v9 ID is below 256.
 // Definition is replaced with a hash of ScopeN and the field list.
 func (c *Cache) Put(key Key, t Template) (changed bool, evicted netip.Addr, err error) {
@@ -133,20 +136,25 @@ func (c *Cache) Put(key Key, t Template) (changed bool, evicted netip.Addr, err 
 	if len(c.byKey) >= c.max {
 		victim := c.oldestExporter()
 		if victim.IsValid() {
-			c.deleteExporter(victim, true)
+			c.deleteExporter(victim)
 			c.pending[key.Exporter] = append(c.pending[key.Exporter], victim)
 			evicted = victim
 		}
 	}
 	c.byKey[key] = stored
+	if evicted == key.Exporter {
+		// A missing touch sorts oldest. Restore it before releasing the mutex.
+		c.touch[key.Exporter] = stored.Received
+	}
 	return false, evicted, nil
 }
 
 // TakeEvictions returns exporter IPs that Put evicted while inserting
 // templates for by, and clears that list. Accept calls it for the source IP
-// it already locked. by is unmapped. The caller drops that IP's hold,
-// sampling, and sequence state when the victim is by, and records any other
-// victim for ExpireIdle. TakeEvictions does not return an error.
+// it already locked. by is unmapped. The caller drops that IP's hold when
+// the victim is by, and records any other victim for ExpireIdle. Sampling
+// and sequence for a self-eviction are dropped when Put returns, before
+// later records in the datagram. TakeEvictions does not return an error.
 func (c *Cache) TakeEvictions(by netip.Addr) []netip.Addr {
 	c.mu.Lock()
 	defer c.mu.Unlock()
@@ -216,18 +224,16 @@ func (c *Cache) IdleExporters(now time.Time, idle time.Duration) []netip.Addr {
 func (c *Cache) DropExporter(ip netip.Addr) {
 	c.mu.Lock()
 	defer c.mu.Unlock()
-	c.deleteExporter(ip.Unmap(), true)
+	c.deleteExporter(ip.Unmap())
 }
 
-func (c *Cache) deleteExporter(ip netip.Addr, clearTouch bool) {
+func (c *Cache) deleteExporter(ip netip.Addr) {
 	for k := range c.byKey {
 		if k.Exporter == ip {
 			delete(c.byKey, k)
 		}
 	}
-	if clearTouch {
-		delete(c.touch, ip)
-	}
+	delete(c.touch, ip)
 }
 
 // oldestExporter is the IP that currently has a template and the oldest Touch.

@@ -89,6 +89,7 @@ func Parse(d ingest.Datagram, templates *template.Cache, samples *sampling.Cache
 		d:         d,
 		templates: templates,
 		samples:   samples,
+		seq:       seq,
 		counters:  counters,
 		retry:     retry,
 		maxAge:    maxAge,
@@ -100,13 +101,14 @@ func Parse(d ingest.Datagram, templates *template.Cache, samples *sampling.Cache
 			Packets:  1,
 		},
 	}
-	return p.decode(seq)
+	return p.decode()
 }
 
 type parser struct {
 	d         ingest.Datagram
 	templates *template.Cache
 	samples   *sampling.Cache
+	seq       *sequence.Table
 	counters  *obs.Counters
 	retry     bool
 	maxAge    time.Duration
@@ -120,7 +122,6 @@ type parser struct {
 	bad       bool
 	flows     []flow.Flow
 	missing   *template.Pending
-	seenMiss  bool
 	unsized   bool
 	tmplN     int
 	optTmplN  int
@@ -134,7 +135,7 @@ type setRef struct {
 	body []byte
 }
 
-func (p *parser) decode(seq *sequence.Table) ([]flow.Flow, flow.ExporterDelta, *template.Pending, error) {
+func (p *parser) decode() ([]flow.Flow, flow.ExporterDelta, *template.Pending, error) {
 	payload := p.d.Payload
 	if len(payload) < headerLen || binary.BigEndian.Uint16(payload[:2]) != 9 {
 		if len(payload) >= 2 && binary.BigEndian.Uint16(payload[:2]) == 9 {
@@ -151,8 +152,8 @@ func (p *parser) decode(seq *sequence.Table) ([]flow.Flow, flow.ExporterDelta, *
 	pkgSeq := binary.BigEndian.Uint32(payload[12:16])
 	p.domain = binary.BigEndian.Uint32(payload[16:20])
 	p.delta.Domain = p.domain
-	if !p.retry && seq != nil {
-		dec, err := seq.Observe(sequence.Key{Exporter: p.exporter, Domain: p.domain, Version: 9}, pkgSeq, 1)
+	if !p.retry && p.seq != nil {
+		dec, err := p.seq.Observe(sequence.Key{Exporter: p.exporter, Domain: p.domain, Version: 9}, pkgSeq, 1)
 		if err != nil {
 			return nil, p.delta, nil, err
 		}
@@ -292,6 +293,15 @@ func (p *parser) install(id uint16, fields []template.Field, scopeN int) {
 	if evicted.IsValid() {
 		p.countAlways(obs.TemplateEvicted, 1)
 	}
+	if evicted == p.exporter {
+		// Later records in this datagram must not see the evicted cache.
+		if p.samples != nil {
+			p.samples.DropExporter(p.exporter)
+		}
+		if p.seq != nil {
+			p.seq.DropExporter(p.exporter)
+		}
+	}
 }
 
 func (p *parser) dataSet(s setRef) {
@@ -314,7 +324,6 @@ func (p *parser) dataSet(s setRef) {
 				RetryAt:    s.off,
 			}
 		}
-		p.seenMiss = true
 		p.unsized = true
 		return
 	}
@@ -349,7 +358,7 @@ func (p *parser) dataSet(s setRef) {
 			continue
 		}
 		f, st := p.makeFlow(v)
-		if p.seenMiss {
+		if p.missing != nil {
 			continue
 		}
 		p.flows = append(p.flows, f)
@@ -370,6 +379,7 @@ func (p *parser) optionsData(tpl template.Template, rec []byte) {
 		algo35   *uint8
 		algo49   *uint8
 		sampler  *uint64
+		scopeOK  int
 	)
 	off := 0
 	for i, f := range tpl.Fields {
@@ -383,6 +393,7 @@ func (p *parser) optionsData(tpl template.Template, rec []byte) {
 			if x, ok := readUint(raw); ok {
 				if key, ok := scopeName(f.Type, x); ok {
 					keys = append(keys, key)
+					scopeOK++
 				}
 			}
 			continue
@@ -404,25 +415,21 @@ func (p *parser) optionsData(tpl template.Template, rec []byte) {
 			sampler = ptrU64(x)
 		}
 	}
-	var n uint32
-	switch {
-	case interval != nil && *interval <= math.MaxUint32:
-		n = uint32(*interval)
-	case interval == nil && random != nil && *random > 1 && *random <= math.MaxUint32:
-		n = uint32(*random)
-	}
-	var algo uint8
+	var algo *uint8
 	switch {
 	case algo35 != nil:
-		algo = *algo35
+		algo = algo35
 	case algo49 != nil:
-		algo = *algo49
+		algo = algo49
 	}
-	sample := sampling.Sample{N: n, Algorithm: algo, Sampled: n > 1}
+	sample := factSample(interval, random, algo)
 	if sampler != nil {
 		keys = append(keys, "sampler:"+strconv.FormatUint(*sampler, 10))
 	}
 	if len(keys) == 0 {
+		if tpl.ScopeN > 0 && scopeOK == 0 {
+			return
+		}
 		keys = []string{"device"}
 	}
 	for _, k := range keys {
@@ -434,18 +441,7 @@ func (p *parser) storeFact(v values) {
 	if p.samples == nil {
 		return
 	}
-	var n uint32
-	switch {
-	case v.interval != nil && *v.interval <= math.MaxUint32:
-		n = uint32(*v.interval)
-	case v.interval == nil && v.random != nil && *v.random > 1 && *v.random <= math.MaxUint32:
-		n = uint32(*v.random)
-	}
-	var algo uint8
-	if v.algo != nil {
-		algo = *v.algo
-	}
-	sample := sampling.Sample{N: n, Algorithm: algo, Sampled: n > 1}
+	sample := factSample(v.interval, v.random, v.algo)
 	var keys []string
 	if v.inputIf != nil {
 		keys = append(keys, "if:"+strconv.FormatUint(uint64(*v.inputIf), 10))
@@ -459,6 +455,24 @@ func (p *parser) storeFact(v values) {
 	for _, k := range keys {
 		p.samples.Put(sampling.SampleKey{Exporter: p.exporter, Domain: p.domain, Scope: k}, sample)
 	}
+}
+
+// factSample is the shared N rule for options data and address-less records.
+func factSample(interval, random *uint64, algo *uint8) sampling.Sample {
+	rated := sampling.Rate(sampling.Input{
+		Interval:       interval,
+		RandomInterval: random,
+		Algorithm:      algo,
+	})
+	var s sampling.Sample
+	if rated.SamplingInterval != nil {
+		s.N = *rated.SamplingInterval
+	}
+	s.Sampled = rated.Sampled
+	if rated.SamplingAlgorithm != nil {
+		s.Algorithm = *rated.SamplingAlgorithm
+	}
+	return s
 }
 
 type stampCounts struct {
@@ -479,18 +493,7 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 		RandomInterval:  v.random,
 		Algorithm:       v.algo,
 	}
-	needN := v.interval == nil && v.random == nil
-	needA := v.algo == nil
-	if p.samples != nil && (needN || needA) {
-		if s, ok := p.samples.Lookup(p.exporter, p.domain, lookupScopes(v)); ok {
-			if needN && s.N > 0 {
-				in.Interval = ptrU64(uint64(s.N))
-			}
-			if needA && s.Algorithm != 0 {
-				in.Algorithm = ptrU8(s.Algorithm)
-			}
-		}
-	}
+	p.applyCachedRate(v, &in)
 	rated := sampling.Rate(in)
 	var f flow.Flow
 	f.Src = v.src
@@ -525,7 +528,8 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 	f.Domain = p.domain
 	f.Version = 9
 	f.ReceivedAt = p.d.ReceivedAt
-	var first, last uint32
+	// A missing switched field is the export time, not device millisecond 0.
+	first, last := p.sysUp, p.sysUp
 	if v.hasFirst {
 		first = v.first
 	}
@@ -719,7 +723,43 @@ func readRecord(fields []template.Field, rec []byte) (values, bool) {
 	return v, true
 }
 
-func lookupScopes(v values) []string {
+func (p *parser) applyCachedRate(v values, in *sampling.Input) {
+	if p.samples == nil {
+		return
+	}
+	needN := !recordSuppliesN(v.interval, v.random)
+	needA := v.algo == nil
+	if !needN && !needA {
+		return
+	}
+	facts := p.samples.Facts(p.exporter, p.domain)
+	for _, scope := range flowScopes(v, facts) {
+		s, ok := facts[scope]
+		if !ok || s.N == 0 {
+			continue
+		}
+		if needN {
+			in.Interval = ptrU64(uint64(s.N))
+			needN = false
+		}
+		if needA && s.Algorithm != 0 {
+			in.Algorithm = ptrU8(s.Algorithm)
+			needA = false
+		}
+		if !needN && !needA {
+			return
+		}
+	}
+}
+
+func recordSuppliesN(interval, random *uint64) bool {
+	if interval != nil && *interval > 1 {
+		return true
+	}
+	return random != nil && *random > 1
+}
+
+func flowScopes(v values, facts map[string]sampling.Sample) []string {
 	var s []string
 	if v.inputIf != nil {
 		s = append(s, "if:"+strconv.FormatUint(uint64(*v.inputIf), 10))
@@ -727,8 +767,30 @@ func lookupScopes(v values) []string {
 	if v.sampler != nil {
 		s = append(s, "sampler:"+strconv.FormatUint(*v.sampler, 10))
 	}
+	for _, prefix := range []string{"linecard:", "cache:", "template:"} {
+		if scope, ok := soleScope(facts, prefix); ok {
+			s = append(s, scope)
+		}
+	}
 	s = append(s, "device")
 	return s
+}
+
+func soleScope(facts map[string]sampling.Sample, prefix string) (string, bool) {
+	found := ""
+	for scope := range facts {
+		if len(scope) < len(prefix) || scope[:len(prefix)] != prefix {
+			continue
+		}
+		if found != "" {
+			return "", false
+		}
+		found = scope
+	}
+	if found == "" {
+		return "", false
+	}
+	return found, true
 }
 
 func scopeName(typ uint16, v uint64) (string, bool) {

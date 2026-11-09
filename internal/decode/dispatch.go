@@ -12,8 +12,6 @@ import (
 	"vibecollector/internal/template"
 )
 
-// v5 and v9 import this package for timestamps, so Dispatch cannot import
-// them. Each parser registers itself from init.
 type v5Parser func(d ingest.Datagram, samples *sampling.Cache, seq *sequence.Table, counters *obs.Counters, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, error)
 
 type v9Parser func(d ingest.Datagram, templates *template.Cache, samples *sampling.Cache, seq *sequence.Table, counters *obs.Counters, retry bool, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, *template.Pending, error)

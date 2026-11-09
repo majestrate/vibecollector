@@ -289,8 +289,9 @@ func TestZeroUnixUsesReceive(t *testing.T) {
 
 func TestExplicitZeroMaxAge(t *testing.T) {
 	templates := mustCache(t)
-	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}})
-	rec := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {22, 4}, {21, 4}})
+	rec := make([]byte, 16)
+	copy(rec[:8], []byte{1, 2, 3, 4, 5, 6, 7, 8})
 	pkt := append(header(2, 10000, 1_700_000_000, 0, 1), flowSet(0, body)...)
 	pkt = append(pkt, flowSet(256, rec)...)
 	counters := obs.NewCounters()
@@ -371,6 +372,147 @@ func TestSamplingWithoutAddresses(t *testing.T) {
 	}
 	if counters.Snapshot()[obs.NonFlowRecords] != 1 {
 		t.Fatal(counters.Snapshot()[obs.NonFlowRecords])
+	}
+}
+
+func TestRateWhenIntervalIsZeroOrOne(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.8")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	specs := optionsBody(256, 4, 8, [][2]uint16{{1, 4}, {34, 4}, {50, 4}})
+	vals := make([]byte, 12)
+	binary.BigEndian.PutUint32(vals[4:8], 1)
+	binary.BigEndian.PutUint32(vals[8:12], 100)
+	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(1, specs)...)
+	pkt = append(pkt, flowSet(256, vals)...)
+	samples := sampling.NewCache()
+	if _, _, _, err := Parse(datagram(pkt, ip, at), mustCache(t), samples, nil, nil, false, time.Hour, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := samples.Lookup(ip, 1, []string{"device"})
+	if !ok || got.N != 100 || !got.Sampled {
+		t.Fatalf("options %+v %v", got, ok)
+	}
+
+	body := templateBody(256, [][2]uint16{{34, 4}, {50, 4}, {10, 4}})
+	rec := make([]byte, 12)
+	binary.BigEndian.PutUint32(rec[4:8], 100)
+	binary.BigEndian.PutUint32(rec[8:12], 3)
+	pkt = append(header(2, 0, 1_700_000_000, 0, 4), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	samples = sampling.NewCache()
+	if _, _, _, err := Parse(datagram(pkt, ip, at), mustCache(t), samples, nil, nil, false, time.Hour, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, ok = samples.Lookup(ip, 4, []string{"if:3"})
+	if !ok || got.N != 100 || !got.Sampled {
+		t.Fatalf("address-less %+v %v", got, ok)
+	}
+
+	bad := optionsBody(257, 4, 4, [][2]uint16{{99, 4}, {34, 4}})
+	vals = make([]byte, 8)
+	binary.BigEndian.PutUint32(vals[0:4], 5)
+	binary.BigEndian.PutUint32(vals[4:8], 100)
+	pkt = append(header(2, 0, 1_700_000_000, 1, 1), flowSet(1, bad)...)
+	pkt = append(pkt, flowSet(257, vals)...)
+	samples = sampling.NewCache()
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "device"}, sampling.Sample{N: 7, Sampled: true})
+	if _, _, _, err := Parse(datagram(pkt, ip, at), mustCache(t), samples, nil, nil, false, time.Hour, time.Second); err != nil {
+		t.Fatal(err)
+	}
+	got, ok = samples.Lookup(ip, 1, []string{"device"})
+	if !ok || got.N != 7 {
+		t.Fatalf("failed scope replaced device %+v %v", got, ok)
+	}
+}
+
+func TestCachedSamplingWalk(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.8")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	flowPkt := func(fields [][2]uint16, rec []byte) []byte {
+		pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, templateBody(256, fields))...)
+		return append(pkt, flowSet(256, rec)...)
+	}
+	parse := func(samples *sampling.Cache, pkt []byte) flow.Flow {
+		t.Helper()
+		flows, _, _, err := Parse(datagram(pkt, ip, at), mustCache(t), samples, nil, nil, false, 2*time.Hour, 5*time.Second)
+		if err != nil || len(flows) != 1 {
+			t.Fatalf("flows %d err %v", len(flows), err)
+		}
+		return flows[0]
+	}
+	addrs := [][2]uint16{{8, 4}, {12, 4}, {2, 4}}
+	rec := make([]byte, 12)
+	binary.BigEndian.PutUint32(rec[8:12], 1)
+
+	samples := sampling.NewCache()
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "linecard:4"}, sampling.Sample{N: 100, Algorithm: 2, Sampled: true})
+	f := parse(samples, flowPkt(addrs, rec))
+	if !f.Sampled || f.SamplingInterval == nil || *f.SamplingInterval != 100 || f.SamplingAlgorithm == nil || *f.SamplingAlgorithm != 2 {
+		t.Fatalf("linecard %+v", f)
+	}
+
+	withIf := [][2]uint16{{8, 4}, {12, 4}, {10, 4}, {2, 4}}
+	recIf := make([]byte, 16)
+	binary.BigEndian.PutUint32(recIf[8:12], 7)
+	binary.BigEndian.PutUint32(recIf[12:16], 1)
+	samples = sampling.NewCache()
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "if:7"}, sampling.Sample{N: 0})
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "device"}, sampling.Sample{N: 100, Sampled: true})
+	f = parse(samples, flowPkt(withIf, recIf))
+	if !f.Sampled || f.SamplingInterval == nil || *f.SamplingInterval != 100 {
+		t.Fatalf("zero N hid device %+v", f)
+	}
+
+	samples = sampling.NewCache()
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "linecard:1"}, sampling.Sample{N: 40, Sampled: true})
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "linecard:2"}, sampling.Sample{N: 80, Sampled: true})
+	f = parse(samples, flowPkt(addrs, rec))
+	if f.Sampled || f.SamplingInterval != nil {
+		t.Fatalf("invented a linecard %+v", f)
+	}
+
+	withN := [][2]uint16{{8, 4}, {12, 4}, {34, 4}, {2, 4}}
+	recN := make([]byte, 16)
+	binary.BigEndian.PutUint32(recN[8:12], 1)
+	binary.BigEndian.PutUint32(recN[12:16], 1)
+	samples = sampling.NewCache()
+	samples.Put(sampling.SampleKey{Exporter: ip, Domain: 1, Scope: "device"}, sampling.Sample{N: 100, Sampled: true})
+	f = parse(samples, flowPkt(withN, recN))
+	if !f.Sampled || f.SamplingInterval == nil || *f.SamplingInterval != 100 {
+		t.Fatalf("interval 1 hid device %+v", f)
+	}
+}
+
+func TestMissingSwitchUsesExport(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.8")
+	unix := uint32(1_700_000_000)
+	export := time.Unix(int64(unix), 0).UTC()
+	sysUp := uint32(3 * time.Hour / time.Millisecond)
+	counters := obs.NewCounters()
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}})
+	rec := []byte{1, 2, 3, 4, 5, 6, 7, 8}
+	pkt := append(header(2, sysUp, unix, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, ip, export), mustCache(t), nil, nil, counters, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	if !flows[0].Start.Equal(export) || !flows[0].End.Equal(export) || counters.Snapshot()[obs.TimestampSuspect] != 0 {
+		t.Fatalf("both missing %s %s suspect %d", flows[0].Start, flows[0].End, counters.Snapshot()[obs.TimestampSuspect])
+	}
+
+	body = templateBody(257, [][2]uint16{{8, 4}, {12, 4}, {22, 4}})
+	rec = make([]byte, 12)
+	copy(rec[:8], []byte{1, 2, 3, 4, 5, 6, 7, 8})
+	pkt = append(header(2, sysUp, unix, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(257, rec)...)
+	counters = obs.NewCounters()
+	flows, _, _, err = Parse(datagram(pkt, ip, export), mustCache(t), nil, nil, counters, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	if !flows[0].Start.Equal(export.Add(-2*time.Hour)) || !flows[0].End.Equal(export) || counters.Snapshot()[obs.TimestampSuspect] != 1 {
+		t.Fatalf("last missing %s %s suspect %d", flows[0].Start, flows[0].End, counters.Snapshot()[obs.TimestampSuspect])
 	}
 }
 

@@ -207,6 +207,9 @@ func TestExpireIdle(t *testing.T) {
 	if counters.Snapshot()[obs.TemplateIdleExpired] != 0 {
 		t.Fatal("ExpireIdle incremented template_idle_expired")
 	}
+	if counters.Snapshot()[obs.DroppedTemplate] != 1 {
+		t.Fatal("idle expiry did not count held datagrams", counters.Snapshot()[obs.DroppedTemplate])
+	}
 	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); ok {
 		t.Fatal("template remains")
 	}
@@ -283,12 +286,78 @@ func TestSelfEvictionRestoresTouch(t *testing.T) {
 	if counters.Snapshot()[obs.TemplateEvicted] != 1 {
 		t.Fatal(counters.Snapshot()[obs.TemplateEvicted])
 	}
+	if counters.Snapshot()[obs.DroppedTemplate] != 1 {
+		t.Fatal("self eviction did not count the held datagram", counters.Snapshot()[obs.DroppedTemplate])
+	}
 	if got, err := s.ExpireIdle(t1.Add(30*time.Minute), 30*time.Minute); err != nil || len(got) != 0 {
 		t.Fatal(got, err)
 	}
 	got, err := s.ExpireIdle(t1.Add(30*time.Minute+time.Nanosecond), 30*time.Minute)
 	if err != nil || len(got) != 1 || got[0] != a {
 		t.Fatal(got, err)
+	}
+}
+
+func TestRecordedEvictionClearsOnAccept(t *testing.T) {
+	s, templates, hold, samples, _, counters := session(t, 1, 8, 8)
+	a := netip.MustParseAddr("192.0.2.10")
+	b := netip.MustParseAddr("192.0.2.11")
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: a, ReceivedAt: t0})
+	samples.Put(sampling.SampleKey{Exporter: a, Domain: 1, Scope: "device"}, sampling.Sample{N: 9, Sampled: true})
+	hold.Put(template.Pending{Exporter: a, Payload: []byte{9}, Version: 9, Domain: 1})
+	t1 := t0.Add(time.Minute)
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: b, ReceivedAt: t1})
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 40, 300), Src: a, ReceivedAt: t1})
+	if counters.Snapshot()[obs.SequenceGapV9Packets] != 0 {
+		t.Fatal("evicted exporter counted a gap", counters.Snapshot()[obs.SequenceGapV9Packets])
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); ok {
+		t.Fatal("old sampling survived the return")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 300}); !ok {
+		t.Fatal("template installed on return is missing")
+	}
+	if _, err := s.ExpireIdle(t1, 30*time.Minute); err != nil {
+		t.Fatal(err)
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 300}); !ok {
+		t.Fatal("reaper dropped templates installed after the eviction")
+	}
+}
+
+func TestSelfEvictionKeepsLaterSample(t *testing.T) {
+	s, templates, _, samples, _, _ := session(t, 1, 8, 8)
+	a := netip.MustParseAddr("192.0.2.12")
+	t0 := time.Unix(1_700_000_000, 0).UTC()
+	s.Accept(ingest.Datagram{Payload: templatePacket(1, 0, 256), Src: a, ReceivedAt: t0})
+	samples.Put(sampling.SampleKey{Exporter: a, Domain: 1, Scope: "device"}, sampling.Sample{N: 3, Sampled: true})
+	spec := make([]byte, 14)
+	binary.BigEndian.PutUint16(spec[0:2], 257)
+	binary.BigEndian.PutUint16(spec[2:4], 4)
+	binary.BigEndian.PutUint16(spec[4:6], 4)
+	binary.BigEndian.PutUint16(spec[6:8], 2)
+	binary.BigEndian.PutUint16(spec[8:10], 4)
+	binary.BigEndian.PutUint16(spec[10:12], 34)
+	binary.BigEndian.PutUint16(spec[12:14], 4)
+	vals := make([]byte, 8)
+	binary.BigEndian.PutUint32(vals[0:4], 7)
+	binary.BigEndian.PutUint32(vals[4:8], 100)
+	pkt := append(v9Header(2, 0, 1_700_000_000, 1, 1), flowSet(1, spec)...)
+	pkt = append(pkt, flowSet(257, vals)...)
+	s.Accept(ingest.Datagram{Payload: pkt, Src: a, ReceivedAt: t0.Add(time.Second)})
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 256}); ok {
+		t.Fatal("old template")
+	}
+	if _, ok := templates.Get(template.Key{Exporter: a, Domain: 1, Version: 9, ID: 257}); !ok {
+		t.Fatal("new template")
+	}
+	if _, ok := samples.Lookup(a, 1, []string{"device"}); ok {
+		t.Fatal("old device fact survived self-eviction")
+	}
+	got, ok := samples.Lookup(a, 1, []string{"if:7"})
+	if !ok || got.N != 100 || !got.Sampled {
+		t.Fatalf("later fact %+v %v", got, ok)
 	}
 }
 

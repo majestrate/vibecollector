@@ -66,18 +66,35 @@ func NewSession(templates *template.Cache, hold *template.Hold, samples *samplin
 // flows may be empty. Accept does not enqueue and does not return an error.
 // When a data set has no template, Accept copies the datagram into Hold under
 // the same mutex. A worker never locks two exporter mutexes.
-// When Cache.Put evicts d.Src, Accept drops that IP's hold, sampling, and
-// sequence state under the mutex it already holds. When the evicted IP is a
-// different address, Accept records it and does not lock it. ExpireIdle drops
-// that IP. A structural failure leaves malformed incremented once by the
-// parser. Accept does not increment it again. A hold retry does not increment
-// missing_template or malformed a second time for the same set, and it does
-// not call Observe again.
+// If this IP is in the recorded eviction set, Accept drops its hold, sampling,
+// and sequence state and removes the set entry before Dispatch. It does not
+// drop templates. ExpireIdle still drops recorded IPs that have not spoken
+// since the eviction.
+// When Cache.Put evicts d.Src, sampling and sequence are dropped at that Put,
+// before later records in the datagram store new facts. Accept then drops
+// that IP's hold under the mutex it already holds and does not drop those
+// facts. When the evicted IP is a different address, Accept records it and
+// does not lock it. ExpireIdle drops that IP. A structural failure leaves
+// malformed incremented once by the parser. Accept does not increment it
+// again. A hold retry does not increment missing_template or malformed a
+// second time for the same set, and it does not call Observe again.
 func (s *Session) Accept(d ingest.Datagram) (flows []flow.Flow, delta flow.ExporterDelta) {
 	ip := d.Src.Unmap()
 	mu := s.mutexFor(ip)
 	mu.Lock()
 	defer mu.Unlock()
+
+	s.mu.Lock()
+	_, recorded := s.evict[ip]
+	if recorded {
+		delete(s.evict, ip)
+	}
+	s.mu.Unlock()
+	if recorded {
+		s.noteHoldDrop(s.hold.DropExporter(ip))
+		s.samples.DropExporter(ip)
+		s.seq.DropExporter(ip)
+	}
 
 	s.templates.Touch(ip, d.ReceivedAt)
 	flows, delta, missing, _ := Dispatch(d, s.templates, s.samples, s.seq, s.counters, false, s.maxAge, s.skew)
@@ -165,9 +182,8 @@ func (s *Session) applyEvictions(ip netip.Addr, at time.Time) (self bool) {
 	for _, ev := range s.templates.TakeEvictions(ip) {
 		ev = ev.Unmap()
 		if ev == ip {
-			s.hold.DropExporter(ip)
-			s.samples.DropExporter(ip)
-			s.seq.DropExporter(ip)
+			// Sampling and sequence were dropped when Put reported this IP.
+			s.noteHoldDrop(s.hold.DropExporter(ip))
 			// Put cleared this IP's touch while removing the old templates.
 			s.templates.Touch(ip, at)
 			self = true
@@ -184,10 +200,16 @@ func (s *Session) dropIP(ip netip.Addr) {
 	mu := s.mutexFor(ip)
 	mu.Lock()
 	s.templates.DropExporter(ip)
-	s.hold.DropExporter(ip)
+	s.noteHoldDrop(s.hold.DropExporter(ip))
 	s.samples.DropExporter(ip)
 	s.seq.DropExporter(ip)
 	mu.Unlock()
+}
+
+func (s *Session) noteHoldDrop(n int) {
+	if n > 0 {
+		_ = s.counters.Add(obs.DroppedTemplate, uint64(n))
+	}
 }
 
 func (s *Session) drain(ip netip.Addr, at time.Time) []flow.Flow {

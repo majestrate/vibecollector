@@ -133,6 +133,31 @@ func TestSelfEvictKeepsNewTemplate(t *testing.T) {
 	}
 }
 
+func TestSelfEvictRestoresTouch(t *testing.T) {
+	c, err := NewCache(1)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ip := netip.MustParseAddr("192.0.2.9")
+	recv := time.Unix(50, 0).UTC()
+	fields := []Field{{Type: 8, Length: 4}}
+	c.Touch(ip, time.Unix(10, 0))
+	if _, _, err := c.Put(Key{Exporter: ip, Version: 9, ID: 256}, Template{Fields: fields, Received: time.Unix(10, 0)}); err != nil {
+		t.Fatal(err)
+	}
+	_, ev, err := c.Put(Key{Exporter: ip, Version: 9, ID: 257}, Template{Fields: fields, Received: recv})
+	if err != nil || ev != ip {
+		t.Fatal(ev, err)
+	}
+	if ips := c.IdleExporters(recv.Add(time.Nanosecond), time.Nanosecond); len(ips) != 0 {
+		t.Fatal("restored touch is already idle", ips)
+	}
+	ips := c.IdleExporters(recv.Add(time.Minute+time.Nanosecond), time.Minute)
+	if len(ips) != 1 || ips[0] != ip {
+		t.Fatal(ips)
+	}
+}
+
 func TestWithdrawVersion10Only(t *testing.T) {
 	c, _ := NewCache(8)
 	ip := netip.MustParseAddr("192.0.2.4")

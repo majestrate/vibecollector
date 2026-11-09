@@ -127,14 +127,18 @@ func (h *Hold) Advance(ip netip.Addr, id uint64, retryAt int) {
 	}
 }
 
-// DropExporter deletes every entry for ip. ip is unmapped.
+// DropExporter deletes every entry for ip and returns how many were removed.
+// The caller adds that count to dropped_template. A retry that decodes, or
+// a datagram that is only held, is not included. ip is unmapped.
 // DropExporter does not return an error.
-func (h *Hold) DropExporter(ip netip.Addr) {
+func (h *Hold) DropExporter(ip netip.Addr) int {
 	h.mu.Lock()
 	defer h.mu.Unlock()
 	ip = ip.Unmap()
-	h.n -= len(h.q[ip])
+	n := len(h.q[ip])
+	h.n -= n
 	delete(h.q, ip)
+	return n
 }
 
 // dropOne removes the oldest entry for ip, or the globally oldest entry when
@@ -144,8 +148,6 @@ func (h *Hold) dropOne(ip netip.Addr) bool {
 		h.removeAt(ip, 0)
 		return true
 	}
-	// This exporter has nothing queued, and the global cap is still full.
-	// Drop the oldest datagram in the buffer so the insert stays inside the cap.
 	var oldestIP netip.Addr
 	var oldestID uint64
 	found := false

@@ -217,6 +217,5 @@ func add(c *obs.Counters, name obs.Name, n uint64) {
 }
 
 func init() {
-	// v5 imports decode for timestamps, so decode.Dispatch cannot import v5.
 	decode.RegisterV5Parser(Parse)
 }
