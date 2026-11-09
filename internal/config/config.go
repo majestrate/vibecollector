@@ -6,7 +6,6 @@ import (
 	"errors"
 	"fmt"
 	"io"
-	"log/slog"
 	"net"
 	"net/netip"
 	"os"
@@ -32,10 +31,11 @@ var (
 	// 0.0.0.0 and :: are not loopback. errors.Is reports this sentinel.
 	ErrTokenRequired = errors.New("http.token is required when http.listen is not loopback")
 
-	// ErrBadConfig means a duration is invalid, db.raw_retention is under
-	// 1 minute, db.rollup_retention is under 1 hour, a queue depth is under 1,
-	// log.level is not debug, info, warn, or error, or http.listen is not
-	// host:port. errors.Is reports this sentinel.
+	// ErrBadConfig means a duration is invalid, including a non-string value,
+	// db.raw_retention is under 1 minute, db.rollup_retention is under 1 hour,
+	// a queue depth is under 1, including an explicit zero, log.level is not
+	// debug, info, warn, or error, or http.listen is not host:port.
+	// errors.Is reports this sentinel.
 	ErrBadConfig = errors.New("invalid configuration")
 )
 
@@ -55,13 +55,18 @@ type Flags struct {
 // LooseFileMode is true when a config file was opened and its mode has
 // perm&0077 != 0. That is not a load error. main logs a warning.
 // It is not a file key (`toml:"-"`).
+// ReservedSeen names the reserved enrich tables present in the file:
+// "geoip", "asn", and "reputation", in that order. An absent table is
+// omitted. It is not a file key. main logs "enrich.<name>: reserved table, ignored"
+// for each name. Load does not log.
 type Config struct {
-	UDP           UDP    `toml:"udp"`
-	HTTP          HTTP   `toml:"http"`
-	DB            DB     `toml:"db"`
-	Enrich        Enrich `toml:"enrich"`
-	Log           Log    `toml:"log"`
-	LooseFileMode bool   `toml:"-"`
+	UDP           UDP      `toml:"udp"`
+	HTTP          HTTP     `toml:"http"`
+	DB            DB       `toml:"db"`
+	Enrich        Enrich   `toml:"enrich"`
+	Log           Log      `toml:"log"`
+	LooseFileMode bool     `toml:"-"`
+	ReservedSeen  []string `toml:"-"`
 }
 
 // UDP is the socket and the queue depths. Listen is host:port.
@@ -151,11 +156,13 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // including a typo under [udp] or an unknown sibling of [enrich].
 // A child key of [enrich.geoip], [enrich.asn], or [enrich.reputation] is
 // discarded by (*ReservedTable).UnmarshalTOML([]byte) error and is not an error.
-// When one of those tables is present, Load logs
-// "enrich.<name>: reserved table, ignored".
+// When one of those tables is present, Load records its name on
+// Config.ReservedSeen ("geoip", "asn", "reputation", in that order) and does
+// not log. main logs "enrich.<name>: reserved table, ignored".
 // It returns ErrTokenRequired when http.listen is not loopback and the token
-// is empty. It returns ErrBadConfig when a duration is invalid, a retention
-// is shorter than one grain, a queue depth is less than 1, log.level is not
+// is empty. It returns ErrBadConfig when a duration is invalid, including a
+// non-string value or an explicit zero on a retention that has a minimum, a
+// queue depth is less than 1, including an explicit zero, log.level is not
 // a known name, or http.listen is not host:port.
 // A missing default file is not an error. A missing file named by ConfigPath,
 // or a file that cannot be read, is returned unwrapped and is not one of the
@@ -177,9 +184,6 @@ func Load(flags Flags) (*Config, error) {
 	applyFlags(cfg, flags)
 	if err := validate(cfg); err != nil {
 		return nil, err
-	}
-	if opened {
-		logReserved(data)
 	}
 	return cfg, nil
 }
@@ -210,24 +214,41 @@ func readConfig(path string) ([]byte, bool, bool, error) {
 }
 
 func decode(data []byte, cfg *Config) error {
-	rewritten, err := rewriteDurations(data)
+	rewritten, seen, err := rewriteDurations(data)
 	if err != nil {
 		return err
 	}
 	dec := toml.NewDecoder(bytes.NewReader(rewritten))
 	err = dec.EnableUnmarshalerInterface().DisallowUnknownFields().Decode(cfg)
-	if err == nil {
-		return nil
-	}
-	var strict *toml.StrictMissingError
-	if errors.As(err, &strict) {
-		detail := strict.String()
-		if detail == "" {
-			detail = strict.Error()
+	if err != nil {
+		var strict *toml.StrictMissingError
+		if errors.As(err, &strict) {
+			return fmt.Errorf("%w: %s", ErrUnknownField, strictDetail(strict))
 		}
-		return fmt.Errorf("%w: %s", ErrUnknownField, detail)
+		return fmt.Errorf("%w: %v", ErrBadConfig, err)
 	}
-	return fmt.Errorf("%w: %v", ErrBadConfig, err)
+	cfg.ReservedSeen = seen
+	return nil
+}
+
+// strictDetail names each unknown key and the short reason.
+// It does not include a document window or any other key's value.
+func strictDetail(strict *toml.StrictMissingError) string {
+	if len(strict.Errors) == 0 {
+		return strict.Error()
+	}
+	parts := make([]string, 0, len(strict.Errors))
+	for i := range strict.Errors {
+		e := &strict.Errors[i]
+		msg := strings.TrimPrefix(e.Error(), "toml: ")
+		key := strings.Join(e.Key(), ".")
+		if key == "" {
+			parts = append(parts, msg)
+			continue
+		}
+		parts = append(parts, key+": "+msg)
+	}
+	return strings.Join(parts, "; ")
 }
 
 // durationKeys are the TOML paths whose values are Go durations.
@@ -248,76 +269,162 @@ var durationKeys = map[string]struct{}{
 	"enrich.lookup_timeout":     {},
 }
 
+// queueKeys are channel depths. An explicit integer 0 is ErrBadConfig.
+// Absent keys stay zero and take the default.
+var queueKeys = map[string]struct{}{
+	"udp.datagram_queue": {},
+	"udp.flow_queue":     {},
+	"udp.writer_queue":   {},
+}
+
 type durationRepl struct {
 	off  int
 	end  int
 	text string
 }
 
-func rewriteDurations(data []byte) ([]byte, error) {
+// fileWalk is the one pass over the document: duration rewrites and which
+// reserved enrich tables were present. ReservedTable itself stays empty.
+type fileWalk struct {
+	reps       []durationRepl
+	geoip      bool
+	asn        bool
+	reputation bool
+}
+
+func (w *fileWalk) noteReserved(parts []string) {
+	if len(parts) < 2 || parts[0] != "enrich" {
+		return
+	}
+	switch parts[1] {
+	case "geoip":
+		w.geoip = true
+	case "asn":
+		w.asn = true
+	case "reputation":
+		w.reputation = true
+	}
+}
+
+func (w *fileWalk) seen() []string {
+	var names []string
+	if w.geoip {
+		names = append(names, "geoip")
+	}
+	if w.asn {
+		names = append(names, "asn")
+	}
+	if w.reputation {
+		names = append(names, "reputation")
+	}
+	return names
+}
+
+func rewriteDurations(data []byte) ([]byte, []string, error) {
 	p := &unstable.Parser{}
 	p.Reset(data)
-	var reps []durationRepl
+	var w fileWalk
 	var table []string
 	for p.NextExpression() {
 		expr := p.Expression()
 		switch expr.Kind {
 		case unstable.Table, unstable.ArrayTable:
 			table = append([]string(nil), keyParts(expr)...)
+			w.noteReserved(table)
 		case unstable.KeyValue:
-			if err := collectDurations(expr, table, &reps); err != nil {
-				return nil, err
+			if err := w.collect(expr, table); err != nil {
+				return nil, nil, err
 			}
 		}
 	}
 	if p.Error() != nil {
-		return data, nil
+		return data, w.seen(), nil
 	}
-	if len(reps) == 0 {
-		return data, nil
+	if len(w.reps) == 0 {
+		return data, w.seen(), nil
 	}
-	sort.Slice(reps, func(i, j int) bool { return reps[i].off > reps[j].off })
+	sort.Slice(w.reps, func(i, j int) bool { return w.reps[i].off > w.reps[j].off })
 	out := data
-	for _, r := range reps {
+	for _, r := range w.reps {
 		next := make([]byte, 0, len(out)-(r.end-r.off)+len(r.text))
 		next = append(next, out[:r.off]...)
 		next = append(next, r.text...)
 		next = append(next, out[r.end:]...)
 		out = next
 	}
-	return out, nil
+	return out, w.seen(), nil
 }
 
-func collectDurations(kv *unstable.Node, prefix []string, reps *[]durationRepl) error {
+func (w *fileWalk) collect(kv *unstable.Node, prefix []string) error {
 	parts := append(append([]string{}, prefix...), keyParts(kv)...)
+	w.noteReserved(parts)
 	val := kv.Value()
+	full := strings.Join(parts, ".")
+	_, isDur := durationKeys[full]
 	switch val.Kind {
 	case unstable.String:
-		full := strings.Join(parts, ".")
-		if _, ok := durationKeys[full]; !ok {
+		if !isDur {
 			return nil
 		}
 		d, err := time.ParseDuration(string(val.Data))
 		if err != nil {
 			return fmt.Errorf("%w: %s: %v", ErrBadConfig, full, err)
 		}
-		*reps = append(*reps, durationRepl{
+		if d == 0 {
+			if min := durationMin(full); min > 0 {
+				return fmt.Errorf("%w: %s: shorter than %s", ErrBadConfig, full, min)
+			}
+		}
+		w.reps = append(w.reps, durationRepl{
 			off:  int(val.Raw.Offset),
 			end:  int(val.Raw.Offset) + int(val.Raw.Length),
 			text: strconv.FormatInt(int64(d), 10),
 		})
 	case unstable.InlineTable:
+		if isDur {
+			return fmt.Errorf("%w: %s: duration must be a string", ErrBadConfig, full)
+		}
 		for it := val.Children(); it.Next(); {
 			child := it.Node()
 			if child.Kind != unstable.KeyValue {
 				continue
 			}
-			if err := collectDurations(child, parts, reps); err != nil {
+			if err := w.collect(child, parts); err != nil {
 				return err
 			}
 		}
+	case unstable.Integer:
+		if isDur {
+			return fmt.Errorf("%w: %s: duration must be a string", ErrBadConfig, full)
+		}
+		if _, ok := queueKeys[full]; ok {
+			n, err := tomlInteger(val.Data)
+			if err == nil && n == 0 {
+				return fmt.Errorf("%w: %s", ErrBadConfig, full)
+			}
+		}
+	default:
+		if isDur {
+			return fmt.Errorf("%w: %s: duration must be a string", ErrBadConfig, full)
+		}
 	}
 	return nil
+}
+
+func durationMin(path string) time.Duration {
+	switch path {
+	case "db.raw_retention":
+		return time.Minute
+	case "db.rollup_retention":
+		return time.Hour
+	default:
+		return 0
+	}
+}
+
+func tomlInteger(data []byte) (int64, error) {
+	s := strings.ReplaceAll(string(data), "_", "")
+	return strconv.ParseInt(s, 0, 64)
 }
 
 func keyParts(n *unstable.Node) []string {
@@ -329,7 +436,9 @@ func keyParts(n *unstable.Node) []string {
 	return parts
 }
 
-// Zero means the key was omitted. An explicit zero in the file takes the default too.
+// Zero means the key was absent. An explicit zero duration whose minimum is
+// 0 also arrives here as zero and takes the default. Explicit zero queues
+// and explicit zero retentions that have a minimum are ErrBadConfig earlier.
 func applyDefaults(c *Config) {
 	if c.UDP.Listen == "" {
 		c.UDP.Listen = "0.0.0.0:2055"
@@ -481,21 +590,4 @@ func httpLoopback(listen string) (bool, error) {
 		return false, nil
 	}
 	return addr.IsLoopback(), nil
-}
-
-// Reserved tables keep no presence bit, so the document is the only record that one was set.
-func logReserved(data []byte) {
-	var root map[string]any
-	if err := toml.Unmarshal(data, &root); err != nil {
-		return
-	}
-	enrich, ok := root["enrich"].(map[string]any)
-	if !ok {
-		return
-	}
-	for _, name := range []string{"geoip", "asn", "reputation"} {
-		if _, present := enrich[name]; present {
-			slog.Info("enrich." + name + ": reserved table, ignored")
-		}
-	}
 }

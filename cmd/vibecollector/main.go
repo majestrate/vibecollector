@@ -36,21 +36,16 @@ func main() {
 	}
 
 	var level slog.Level
-	switch cfg.Log.Level {
-	case "debug":
-		level = slog.LevelDebug
-	case "info":
-		level = slog.LevelInfo
-	case "warn":
-		level = slog.LevelWarn
-	case "error":
-		level = slog.LevelError
-	default:
+	if err := level.UnmarshalText([]byte(cfg.Log.Level)); err != nil {
 		level = slog.LevelInfo
 	}
 	slog.SetDefault(slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: level})))
+	for _, name := range cfg.ReservedSeen {
+		slog.Info("enrich." + name + ": reserved table, ignored")
+	}
 	if cfg.LooseFileMode {
-		slog.Warn("config file mode is looser than 0600")
+		// Startup check: slog.Warn on the default handler is dropped at error.
+		slog.New(slog.NewJSONHandler(os.Stdout, &slog.HandlerOptions{Level: slog.LevelWarn})).Warn("config file mode is looser than 0600")
 	}
 
 	_ = obs.NewCounters()

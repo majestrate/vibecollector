@@ -6,6 +6,7 @@ import (
 	"log/slog"
 	"os"
 	"path/filepath"
+	"slices"
 	"strings"
 	"testing"
 	"time"
@@ -64,6 +65,36 @@ func TestUnknownField(t *testing.T) {
 	}
 }
 
+func TestUnknownFieldOmitsNeighborValues(t *testing.T) {
+	body := `
+[http]
+token = "super-secret-token"
+listen = "127.0.0.1:8080"
+not_a_field = true
+[udp]
+template_idle_timeout = "30m"
+litsen = "0.0.0.0:2055"
+`
+	path := writeConfig(t, body, 0o600)
+	_, err := Load(Flags{ConfigPath: path})
+	if !errors.Is(err, ErrUnknownField) {
+		t.Fatalf("err = %v", err)
+	}
+	msg := err.Error()
+	if strings.Contains(msg, "super-secret-token") {
+		t.Fatalf("token leaked: %s", msg)
+	}
+	if strings.Contains(msg, "1800000000000") {
+		t.Fatalf("rewritten duration leaked: %s", msg)
+	}
+	if !strings.Contains(msg, "http.not_a_field: unknown field") {
+		t.Fatalf("missing field detail: %s", msg)
+	}
+	if !strings.Contains(msg, "udp.litsen: unknown field") {
+		t.Fatalf("missing udp detail: %s", msg)
+	}
+}
+
 func TestReservedEnrichTables(t *testing.T) {
 	body := `
 [enrich.geoip]
@@ -93,11 +124,40 @@ token = "not-a-real-token"
 	if cfg.Enrich.ASNTTL != 24*time.Hour || cfg.Enrich.ReputationTTL != time.Hour {
 		t.Fatalf("ttl asn=%s rep=%s", cfg.Enrich.ASNTTL, cfg.Enrich.ReputationTTL)
 	}
-	for _, name := range []string{"geoip", "asn", "reputation"} {
-		want := "enrich." + name + ": reserved table, ignored"
-		if !strings.Contains(buf.String(), want) {
-			t.Fatalf("log %q missing from %s", want, buf.String())
-		}
+	want := []string{"geoip", "asn", "reputation"}
+	if !slices.Equal(cfg.ReservedSeen, want) {
+		t.Fatalf("ReservedSeen = %v", cfg.ReservedSeen)
+	}
+	if buf.Len() != 0 {
+		t.Fatalf("Load logged %s", buf.String())
+	}
+}
+
+func TestReservedSeenShapes(t *testing.T) {
+	cases := []struct {
+		name string
+		body string
+		want []string
+	}{
+		{"empty table", "[enrich.geoip]\n", []string{"geoip"}},
+		{"child table", "[enrich.geoip.child]\npath = \"/x\"\n", []string{"geoip"}},
+		{"array table", "[[enrich.asn]]\nurl = \"https://example.invalid\"\n", []string{"asn"}},
+		{"inline", "enrich = { reputation = { token = \"t\" } }\n", []string{"reputation"}},
+		{"empty inline", "[enrich]\ngeoip = {}\n", []string{"geoip"}},
+		{"dotted", "enrich.asn.url = \"https://example.invalid\"\n", []string{"asn"}},
+		{"ttl is not a table", "[enrich]\ngeoip_ttl = \"1h\"\n", nil},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.body, 0o600)
+			cfg, err := Load(Flags{ConfigPath: path})
+			if err != nil {
+				t.Fatal(err)
+			}
+			if !slices.Equal(cfg.ReservedSeen, tc.want) {
+				t.Fatalf("ReservedSeen = %#v, want %#v", cfg.ReservedSeen, tc.want)
+			}
+		})
 	}
 }
 
@@ -227,7 +287,6 @@ func TestDefaultFileAndFlags(t *testing.T) {
 	body := `
 [udp]
 listen = "127.0.0.1:2055"
-datagram_queue = 0
 [http]
 listen = "0.0.0.0:8080"
 token = ""
@@ -252,7 +311,7 @@ level = "debug"
 		t.Fatalf("flags: http=%s udp=%s db=%s", cfg.HTTP.Listen, cfg.UDP.Listen, cfg.DB.Path)
 	}
 	if cfg.UDP.DatagramQueue != 8192 {
-		t.Fatalf("explicit zero queue = %d", cfg.UDP.DatagramQueue)
+		t.Fatalf("absent queue = %d", cfg.UDP.DatagramQueue)
 	}
 	if cfg.DB.RawRetention != time.Minute || cfg.DB.RollupRetention != time.Hour {
 		t.Fatalf("retention raw=%s rollup=%s", cfg.DB.RawRetention, cfg.DB.RollupRetention)
@@ -320,6 +379,26 @@ func TestBadConfig(t *testing.T) {
 		{"rollup retention", "[db]\nrollup_retention = \"30m\"\n"},
 		{"queue", "[udp]\ndatagram_queue = -1\n"},
 		{"level", "[log]\nlevel = \"warning\"\n"},
+		{"duration int", "[udp]\ntemplate_idle_timeout = 30\n"},
+		{"duration int busy", "[db]\nbusy_timeout = 5\n"},
+		{"duration hex", "[udp]\ntimestamp_skew_slack = 0x5\n"},
+		{"duration underscores", "[http]\nquery_cache_ttl = 1_000\n"},
+		{"duration float", "[udp]\ntemplate_idle_timeout = 1.5\n"},
+		{"duration bool", "[http]\nquery_cache_ttl = true\n"},
+		{"duration int ns", "[db]\nraw_retention = 60000000000\n"},
+		{"inline duration int", "db = { raw_retention = 60 }\n"},
+		{"zero datagram queue", "[udp]\ndatagram_queue = 0\n"},
+		{"zero flow queue", "[udp]\nflow_queue = 0\n"},
+		{"zero writer queue", "[udp]\nwriter_queue = 0\n"},
+		{"zero queue hex", "[udp]\ndatagram_queue = 0x0\n"},
+		{"zero queue octal", "[udp]\nflow_queue = 0o0\n"},
+		{"zero queue binary", "[udp]\nwriter_queue = 0b0\n"},
+		{"zero queue plus", "[udp]\ndatagram_queue = +0\n"},
+		{"zero queue underscores", "[udp]\ndatagram_queue = 0_0\n"},
+		{"inline zero queue", "udp = { datagram_queue = 0 }\n"},
+		{"zero raw retention", "[db]\nraw_retention = \"0s\"\n"},
+		{"negative zero raw", "[db]\nraw_retention = \"-0s\"\n"},
+		{"zero rollup retention", "[db]\nrollup_retention = \"0h\"\n"},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -332,6 +411,33 @@ func TestBadConfig(t *testing.T) {
 				t.Fatalf("wrong sentinel: %v", err)
 			}
 		})
+	}
+}
+
+func TestExplicitZeroWithoutMinimumUsesDefault(t *testing.T) {
+	body := "[db]\nbusy_timeout = \"0s\"\n[udp]\ntemplate_idle_timeout = \"0s\"\n"
+	path := writeConfig(t, body, 0o600)
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.DB.BusyTimeout != 5*time.Second {
+		t.Fatalf("busy_timeout %s", cfg.DB.BusyTimeout)
+	}
+	if cfg.UDP.TemplateIdle != 30*time.Minute {
+		t.Fatalf("template idle %s", cfg.UDP.TemplateIdle)
+	}
+}
+
+func TestExplicitQueueKept(t *testing.T) {
+	body := "[udp]\ndatagram_queue = 1\nflow_queue = 2\nwriter_queue = 3\n"
+	path := writeConfig(t, body, 0o600)
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.UDP.DatagramQueue != 1 || cfg.UDP.FlowQueue != 2 || cfg.UDP.WriterQueue != 3 {
+		t.Fatalf("queues %+v", cfg.UDP)
 	}
 }
 
