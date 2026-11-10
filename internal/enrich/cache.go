@@ -26,7 +26,7 @@ type cached struct {
 
 // Cache is one provider's LRU of {result, expiresAt}. New from
 // hashicorp/golang-lru/v2 has no per-entry TTL. The TTL is expiresAt.
-// An expired get is a miss, and the miss check is inside singleflight.Do.
+// An expired get is a miss, and the miss check is inside singleflight.DoChan.
 type Cache struct {
 	entries *lru.Cache[string, cached]
 	flight  singleflight.Group
@@ -58,21 +58,17 @@ func (c *Cache) Get(ctx context.Context, provider ProviderName, ip netip.Addr, t
 		ctx = context.Background()
 	}
 	key := cacheKey(provider, ip)
-	// The shared call blocks in Do. This waiter can leave without cancelling it.
-	ch := make(chan Result, 1)
-	go func() {
-		v, _, _ := c.flight.Do(key, func() (any, error) {
-			return c.load(provider, ip, ttl, lookupTimeout, lookup), nil
-		})
-		ch <- v.(Result)
-	}()
+	// DoChan does not attach ctx to the shared call. Leaving this select does not cancel it.
+	ch := c.flight.DoChan(key, func() (any, error) {
+		return c.load(provider, ip, ttl, lookupTimeout, lookup), nil
+	})
 	select {
 	case res := <-ch:
-		return res
+		return res.Val.(Result)
 	case <-ctx.Done():
 		select {
 		case res := <-ch:
-			return res
+			return res.Val.(Result)
 		default:
 			return timeoutResult(provider)
 		}
