@@ -4,6 +4,7 @@ import (
 	"errors"
 	"testing"
 	"time"
+	_ "time/tzdata"
 )
 
 func TestNewYorkInstants(t *testing.T) {
@@ -39,6 +40,24 @@ func TestNewYorkInstants(t *testing.T) {
 				t.Fatalf("got %s", got.UTC().Format(time.RFC3339))
 			}
 		})
+	}
+}
+
+func TestLordHoweFold(t *testing.T) {
+	loc, err := time.LoadLocation("Australia/Lord_Howe")
+	if err != nil {
+		t.Fatal(err)
+	}
+	// 30-minute overlap. The earlier instant is +11, not the later +10:30.
+	got, adj, err := resolveCivil(2026, time.April, 5, 1, 45, 0, loc)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if adj {
+		t.Fatal("fold was marked adjusted")
+	}
+	if got.UTC().Format(time.RFC3339) != "2026-04-04T14:45:00Z" {
+		t.Fatal(got.UTC().Format(time.RFC3339))
 	}
 }
 

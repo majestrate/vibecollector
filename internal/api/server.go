@@ -46,7 +46,7 @@ type Server struct {
 	oauth    config.OAuth2
 	q        *store.Query
 	counters *obs.Counters
-	cache    *QueryCache
+	cache    *Cache
 	ui       fs.FS
 	spec     []byte
 	mux      *http.ServeMux
@@ -210,7 +210,9 @@ func (s *Server) route(name string) http.HandlerFunc {
 }
 
 // cached calls Cache.Do. load is the only place that calls Query.
-// Cache-Control no-store sets bypass. A load error is not stored.
+// Cache-Control no-store sets bypass and keeps the request context.
+// A shared load uses a background timeout so one disconnect does not cancel it.
+// A load error is not stored.
 func (s *Server) cached(w http.ResponseWriter, r *http.Request, load func(context.Context) ([]byte, error)) {
 	bypass := strings.Contains(strings.ToLower(r.Header.Get("Cache-Control")), "no-store")
 	key := r.URL.Path
@@ -218,7 +220,11 @@ func (s *Server) cached(w http.ResponseWriter, r *http.Request, load func(contex
 		key += "?" + q
 	}
 	body, err := s.cache.Do(key, bypass, func() ([]byte, error) {
-		ctx, cancel := context.WithTimeout(r.Context(), queryTimeout)
+		parent := r.Context()
+		if !bypass {
+			parent = context.Background()
+		}
+		ctx, cancel := context.WithTimeout(parent, queryTimeout)
 		defer cancel()
 		return load(ctx)
 	})
@@ -329,7 +335,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redir := q.Get("redirect_uri")
-	if !sameOrigin(r, redir) {
+	if !sameOrigin(r, redir, s.oauth.Issuer) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -490,14 +496,36 @@ func pkceOK(verifier, challenge string) bool {
 	return subtle.ConstantTimeCompare(g[:], w[:]) == 1
 }
 
-func sameOrigin(r *http.Request, redirect string) bool {
+// sameOrigin accepts an absolute http or https redirect with no userinfo and
+// no fragment. The origin may be the configured issuer, or the request host.
+// ListenAndServe does not set r.TLS. The scheme is X-Forwarded-Proto when
+// that header is http or https, and http otherwise. X-Forwarded-Host is ignored.
+func sameOrigin(r *http.Request, redirect, issuer string) bool {
 	u, err := url.Parse(redirect)
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return false
 	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if issuer != "" {
+		iu, err := url.Parse(issuer)
+		if err == nil && iu.Host != "" && u.Scheme == iu.Scheme && strings.EqualFold(u.Host, iu.Host) {
+			return true
+		}
+	}
 	scheme := "http"
 	if r.TLS != nil {
 		scheme = "https"
+	} else {
+		p := r.Header.Get("X-Forwarded-Proto")
+		if i := strings.IndexByte(p, ','); i >= 0 {
+			p = p[:i]
+		}
+		p = strings.ToLower(strings.TrimSpace(p))
+		if p == "http" || p == "https" {
+			scheme = p
+		}
 	}
 	return u.Scheme == scheme && strings.EqualFold(u.Host, r.Host)
 }

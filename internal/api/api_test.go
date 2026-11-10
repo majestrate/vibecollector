@@ -150,6 +150,107 @@ func TestClientCredentialsEmptySecret(t *testing.T) {
 	}
 }
 
+func TestAuthorizeRedirectOrigin(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "s3cret")
+	challenge := pkceChallenge(t)
+	s.oauth.Issuer = "https://collector.example"
+	rr := authRedirect(t, s, "https://collector.example/cb", "127.0.0.1:8080", challenge, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = authRedirect(t, s, "https://collector.example/cb#frag", "127.0.0.1:8080", challenge, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = authRedirect(t, s, "https://user:pw@collector.example/cb", "127.0.0.1:8080", challenge, nil)
+	if rr.Code != http.StatusBadRequest {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	s.oauth.Issuer = ""
+	rr = authRedirect(t, s, "https://collector.example/cb", "collector.example", challenge, map[string]string{
+		"X-Forwarded-Proto": "https",
+	})
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = authRedirect(t, s, "https://collector.example/cb", "collector.example", challenge, map[string]string{
+		"X-Forwarded-Proto": "https, http",
+	})
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = authRedirect(t, s, "https://collector.example/cb", "127.0.0.1:8080", challenge, map[string]string{
+		"X-Forwarded-Proto": "https",
+		"X-Forwarded-Host":  "collector.example",
+	})
+	if rr.Code != http.StatusBadRequest {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = authRedirect(t, s, "http://127.0.0.1:8080/cb", "127.0.0.1:8080", challenge, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+}
+
+func TestSharedQueryIgnoresCallerCancel(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "s3cret")
+	tok := clientToken(t, s, "s3cret")
+	ctx, cancel := context.WithCancel(context.Background())
+	cancel()
+	req := httptest.NewRequest(http.MethodGet, s.prefix+"/exporters", nil).WithContext(ctx)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Authorization", "Bearer "+tok)
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	req = httptest.NewRequest(http.MethodGet, s.prefix+"/exporters", nil).WithContext(ctx)
+	req.Host = "127.0.0.1:8080"
+	req.Header.Set("Authorization", "Bearer "+tok)
+	req.Header.Set("Cache-Control", "no-store")
+	rr = httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusServiceUnavailable {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+}
+
+func TestGeoFlowsRoundedCell(t *testing.T) {
+	s, db := newAPI(t, "/api/v1", "s3cret")
+	start := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Minute)
+	end := start.Add(time.Hour)
+	a := flowAt(start, "203.0.113.5", "198.51.100.9", 443, 4, 40, false, nil, "US", "DE", "")
+	b := flowAt(start, "203.0.113.6", "198.51.100.10", 443, 6, 60, false, nil, "US", "DE", "")
+	a.SrcEnrich.Geo.HasLatLon = true
+	a.SrcEnrich.Geo.Lat, a.SrcEnrich.Geo.Lon = 40.26, -74.01
+	a.DstEnrich.Geo.HasLatLon = true
+	a.DstEnrich.Geo.Lat, a.DstEnrich.Geo.Lon = 52.52, 13.405
+	b.SrcEnrich.Geo.HasLatLon = true
+	b.SrcEnrich.Geo.Lat, b.SrcEnrich.Geo.Lon = 40.31, -74.04
+	b.DstEnrich.Geo.HasLatLon = true
+	b.DstEnrich.Geo.Lat, b.DstEnrich.Geo.Lon = 52.47, 13.44
+	writeFlows(t, db, s.q, []flow.Flow{a, b}, start, end)
+	tok := clientToken(t, s, "s3cret")
+	win := "start=" + url.QueryEscape(start.Format(time.RFC3339)) + "&end=" + url.QueryEscape(end.Format(time.RFC3339))
+	geo := mustJSON(t, call(s, http.MethodGet, s.prefix+"/geo?"+win+"&port=443", nil, map[string]string{
+		"Authorization": "Bearer " + tok,
+	}).Body.Bytes())
+	if geo["source"] != "flows" {
+		t.Fatal(geo["source"])
+	}
+	paths := geo["paths"].([]any)
+	if len(paths) != 1 {
+		t.Fatalf("paths %d", len(paths))
+	}
+	row := paths[0].(map[string]any)
+	if row["flows"] != "2" || row["octets"] != "100" {
+		t.Fatal(row)
+	}
+	assertCoord(t, row["src"], "coord", 40.3, -74)
+	assertCoord(t, row["dst"], "coord", 52.5, 13.4)
+}
+
 func TestOpenAPI(t *testing.T) {
 	s, _ := newAPI(t, "/api/v1", "s3cret")
 	rr := call(s, http.MethodGet, "/openapi.json", nil, nil)
@@ -177,6 +278,21 @@ func TestOpenAPI(t *testing.T) {
 	servers := doc["servers"].([]any)
 	if !strings.HasSuffix(servers[0].(map[string]any)["url"].(string), "/api/v1") {
 		t.Fatal(servers[0])
+	}
+	tokenSchema := doc["components"].(map[string]any)["schemas"].(map[string]any)["TokenResponse"].(map[string]any)
+	scopeSchema := tokenSchema["properties"].(map[string]any)["scope"].(map[string]any)
+	enum, _ := scopeSchema["enum"].([]any)
+	if scopeSchema["type"] != "string" || len(enum) != 1 || enum[0] != "read" {
+		t.Fatal(scopeSchema)
+	}
+	var sawScope bool
+	for _, item := range tokenSchema["required"].([]any) {
+		if item == "scope" {
+			sawScope = true
+		}
+	}
+	if !sawScope {
+		t.Fatal(tokenSchema["required"])
 	}
 
 	alt, _ := newAPI(t, "/collector/v1", "s3cret")
@@ -416,6 +532,44 @@ func call(s *Server, method, target string, body io.Reader, hdr map[string]strin
 	rr := httptest.NewRecorder()
 	s.ServeHTTP(rr, req)
 	return rr
+}
+
+func pkceChallenge(t *testing.T) string {
+	t.Helper()
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	sum := sha256.Sum256(buf)
+	return base64.RawURLEncoding.EncodeToString(sum[:])
+}
+
+func authRedirect(t *testing.T, s *Server, redirect, host, challenge string, hdr map[string]string) *httptest.ResponseRecorder {
+	t.Helper()
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "vibecollector-ui")
+	q.Set("redirect_uri", redirect)
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("scope", "read")
+	req := httptest.NewRequest(http.MethodGet, "/oauth/authorize?"+q.Encode(), nil)
+	req.Host = host
+	req.RemoteAddr = "127.0.0.1:9"
+	for k, v := range hdr {
+		req.Header.Set(k, v)
+	}
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	return rr
+}
+
+func assertCoord(t *testing.T, v any, kind string, lat, lon float64) {
+	t.Helper()
+	p := v.(map[string]any)
+	if p["kind"] != kind || p["lat"] != lat || p["lon"] != lon {
+		t.Fatal(p)
+	}
 }
 
 func pkceToken(t *testing.T, s *Server) string {

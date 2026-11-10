@@ -58,7 +58,7 @@ func TestUnknownField(t *testing.T) {
 			if !errors.Is(err, ErrUnknownField) {
 				t.Fatalf("err = %v", err)
 			}
-			if errors.Is(err, ErrBadConfig) || errors.Is(err, ErrTokenRequired) {
+			if errors.Is(err, ErrBadConfig) {
 				t.Fatalf("wrong sentinel: %v", err)
 			}
 		})
@@ -417,7 +417,7 @@ func TestBadConfig(t *testing.T) {
 			if !errors.Is(err, ErrBadConfig) {
 				t.Fatalf("err = %v", err)
 			}
-			if errors.Is(err, ErrUnknownField) || errors.Is(err, ErrTokenRequired) {
+			if errors.Is(err, ErrUnknownField) {
 				t.Fatalf("wrong sentinel: %v", err)
 			}
 		})
@@ -501,7 +501,7 @@ func TestMissingExplicitFile(t *testing.T) {
 	if err == nil {
 		t.Fatal("expected error")
 	}
-	if errors.Is(err, ErrBadConfig) || errors.Is(err, ErrUnknownField) || errors.Is(err, ErrTokenRequired) {
+	if errors.Is(err, ErrBadConfig) || errors.Is(err, ErrUnknownField) {
 		t.Fatalf("missing file wrapped as sentinel: %v", err)
 	}
 	if !errors.Is(err, os.ErrNotExist) {

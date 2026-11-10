@@ -46,7 +46,6 @@ func main() {
 	if err != nil {
 		slog.Error("config", "err", err)
 		if errors.Is(err, config.ErrUnknownField) ||
-			errors.Is(err, config.ErrTokenRequired) ||
 			errors.Is(err, config.ErrBadConfig) {
 			os.Exit(2)
 		}

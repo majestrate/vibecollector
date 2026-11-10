@@ -25,11 +25,6 @@ var (
 	// errors.Is is how a caller tells this apart from the other sentinels.
 	ErrUnknownField = errors.New("unknown configuration field")
 
-	// ErrTokenRequired is the PR 1 sentinel for a non-loopback listener with
-	// an empty http.token. Load does not return it. http.token is ignored.
-	// The sentinel stays so callers can still use errors.Is.
-	ErrTokenRequired = errors.New("http.token is required when http.listen is not loopback")
-
 	// ErrBadConfig means a duration is invalid, including a non-string value,
 	// a negative duration, db.raw_retention is under 1 minute,
 	// db.rollup_retention is under 1 hour, a queue depth is under 1,
@@ -101,8 +96,9 @@ type HTTP struct {
 }
 
 // OAuth2 is the daemon's own authorization server for this UI.
-// There is no external IdP. Issuer defaults to the HTTP listen origin
-// when empty, after flag overrides. UIClientID is the public client for
+// There is no external IdP. Issuer is an allowed origin for the
+// authorization redirect. It defaults to the HTTP listen origin when
+// empty, after flag overrides. UIClientID is the public client for
 // authorization code with PKCE; the browser holds no secret. The same
 // UIClientID is the client id for the client-credentials grant. TokenTTL
 // is the access-token lifetime. ClientSecret is required only when that
@@ -190,7 +186,7 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // http.api_prefix is not an absolute path.
 // A missing default file is not an error. A missing file named by ConfigPath,
 // or a file that cannot be read, is returned unwrapped and is not one of the
-// three sentinels.
+// two sentinels.
 // Load does not bind a socket and does not open the database.
 func Load(flags Flags) (*Config, error) {
 	data, opened, loose, err := readConfig(flags.ConfigPath)
@@ -554,7 +550,8 @@ func applyDefaults(c *Config) {
 
 // applyIssuer fills an empty issuer from http.listen. Flags have already
 // replaced the listen address, so the origin matches the socket main binds.
-// The scheme is http because the daemon does not terminate TLS.
+// The authorization redirect accepts this origin. The scheme is http because
+// the daemon does not terminate TLS.
 func applyIssuer(c *Config) {
 	if c.OAuth2.Issuer == "" {
 		c.OAuth2.Issuer = "http://" + c.HTTP.Listen

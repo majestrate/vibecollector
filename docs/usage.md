@@ -24,7 +24,7 @@ An unknown key is a startup error. A typo does not silently take effect.
 
 `http.listen` defaults to `127.0.0.1:8080`. `http.token` is accepted and ignored. Every route under `http.api_prefix` requires an OAuth2 bearer token with scope `read`. A missing or rejected token is 401, including on loopback. The token is not read from the query string. `http.api_prefix` defaults to `/api/v1` when it is omitted or empty. It must start with `/`, must not end with `/`, and must not contain `?`, `#`, `..`, or an empty segment.
 
-`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The UI uses authorization code with PKCE and sends no client secret.
+`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. The authorization redirect may use that issuer origin, or the request host. The scheme is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The UI uses authorization code with PKCE and sends no client secret.
 
 `GET /openapi.json` serves the OpenAPI document and does not require a token. `GET /oauth/authorize` and `POST /oauth/token` are the daemon's token endpoints and do not require an access token.
 

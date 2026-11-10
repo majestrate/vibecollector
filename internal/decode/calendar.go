@@ -97,11 +97,15 @@ func foldCivil(y int, m time.Month, d, h, mi, s int, loc *time.Location) (time.T
 	if !wallEqual(result, loc, y, m, d, h, mi, s) {
 		return time.Time{}, false
 	}
-	earlier := result.Add(-time.Hour)
-	if wallEqual(earlier, loc, y, m, d, h, mi, s) {
-		return earlier, true
+	// A fold can be shorter than an hour. Walk back and keep the earliest match.
+	earliest := result
+	for i := 1; i <= 180; i++ {
+		prev := result.Add(-time.Duration(i) * time.Minute)
+		if wallEqual(prev, loc, y, m, d, h, mi, s) {
+			earliest = prev
+		}
 	}
-	return result, true
+	return earliest, true
 }
 
 func wallEqual(t time.Time, loc *time.Location, y int, m time.Month, d, h, mi, s int) bool {

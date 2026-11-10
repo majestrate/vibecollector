@@ -775,7 +775,7 @@ paths:
         `client_credentials` requires `client_id` and `client_secret`.
         Optional `scope` is `read`.
 
-        The response is `access_token`, `token_type` `bearer`, and `expires_in`.
+        The response is `access_token`, `token_type` `bearer`, `expires_in`, and `scope` `read`.
         Send the token only as `Authorization: Bearer`.
         The query string is not a token channel.
         This route does not require an existing access token.
@@ -813,6 +813,7 @@ paths:
                 access_token: example-token
                 token_type: bearer
                 expires_in: 3600
+                scope: read
         "400":
           description: |
             The grant is malformed, the code or PKCE verifier was rejected,
@@ -2049,7 +2050,7 @@ components:
     TokenResponse:
       type: object
       additionalProperties: false
-      required: [access_token, token_type, expires_in]
+      required: [access_token, token_type, expires_in, scope]
       properties:
         access_token:
           type: string
@@ -2064,6 +2065,10 @@ components:
           type: integer
           minimum: 1
           description: Lifetime of the access token, in seconds.
+        scope:
+          type: string
+          enum: [read]
+          description: Always `read`.
     OAuthError:
       type: object
       required: [error]
