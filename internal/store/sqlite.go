@@ -11,6 +11,7 @@ import (
 	"sort"
 	"strconv"
 	"strings"
+	"sync/atomic"
 	"time"
 
 	"vibecollector/internal/config"
@@ -26,6 +27,9 @@ var migrationFS embed.FS
 // They do not call Exec on DB.
 type DB struct {
 	pool *sql.DB
+	// shedRaw is set by Sweeper when the database volume is under 5 GiB free.
+	// Writer skips raw flow inserts while it is set. Rollups still update.
+	shedRaw atomic.Bool
 }
 
 // Open opens or creates the SQLite database at cfg.Path, runs migrations, and
