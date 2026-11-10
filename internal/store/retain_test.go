@@ -31,6 +31,39 @@ func TestSweeperRunReturnsNilOnCancel(t *testing.T) {
 	}
 }
 
+func TestStatfsErrorKeepsShedAndDeletes(t *testing.T) {
+	const raw = time.Hour
+	now := time.Unix(1_800_000_000, 0).UTC()
+	prevNow := sweeperNow
+	sweeperNow = func() time.Time { return now }
+	t.Cleanup(func() { sweeperNow = prevNow })
+
+	db, sw, _, counters := openSweep(t, raw, 24*time.Hour)
+	db.shedRaw.Store(true)
+	insertPlainFlow(t, db, now.Add(-2*raw), "192.0.2.80")
+	insertPlainFlow(t, db, now.Add(-raw/2), "192.0.2.81")
+
+	prevFree := freeBytes
+	t.Cleanup(func() { freeBytes = prevFree })
+	freeBytes = func(string) (uint64, error) {
+		return 0, errors.New("statfs")
+	}
+	sw.pass(context.Background())
+
+	if !db.shedRaw.Load() {
+		t.Fatal("shed flag cleared")
+	}
+	if mustCount(t, db, `SELECT COUNT(*) FROM flows WHERE exporter = ?`, "192.0.2.80") != 0 {
+		t.Fatal("expired flow remains")
+	}
+	if mustCount(t, db, `SELECT COUNT(*) FROM flows WHERE exporter = ?`, "192.0.2.81") != 1 {
+		t.Fatal("in-horizon flow missing")
+	}
+	if got := counters.Snapshot()[obs.DroppedDisk]; got != 0 {
+		t.Fatal(got)
+	}
+}
+
 func TestStatfsFreeReadsVolume(t *testing.T) {
 	n, err := statfsFree(t.TempDir())
 	if err != nil || n == 0 {
