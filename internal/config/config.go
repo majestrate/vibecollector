@@ -7,7 +7,6 @@ import (
 	"fmt"
 	"io"
 	"net"
-	"net/netip"
 	"os"
 	"sort"
 	"strconv"
@@ -26,16 +25,17 @@ var (
 	// errors.Is is how a caller tells this apart from the other sentinels.
 	ErrUnknownField = errors.New("unknown configuration field")
 
-	// ErrTokenRequired means http.listen is not a loopback address and
-	// http.token is empty. Loopback is an address in 127.0.0.0/8 or ::1.
-	// 0.0.0.0 and :: are not loopback. errors.Is reports this sentinel.
+	// ErrTokenRequired is the PR 1 sentinel for a non-loopback listener with
+	// an empty http.token. Load does not return it. http.token is ignored.
+	// The sentinel stays so callers can still use errors.Is.
 	ErrTokenRequired = errors.New("http.token is required when http.listen is not loopback")
 
 	// ErrBadConfig means a duration is invalid, including a non-string value,
-	// db.raw_retention is under 1 minute, db.rollup_retention is under 1 hour,
-	// a queue depth is under 1, including an explicit zero, log.level is not
-	// debug, info, warn, or error, or http.listen is not host:port.
-	// errors.Is reports this sentinel.
+	// a negative duration, db.raw_retention is under 1 minute,
+	// db.rollup_retention is under 1 hour, a queue depth is under 1,
+	// including an explicit zero, log.level is not debug, info, warn, or
+	// error, http.listen is not host:port, or http.api_prefix is not an
+	// absolute path. errors.Is reports this sentinel.
 	ErrBadConfig = errors.New("invalid configuration")
 )
 
@@ -62,6 +62,7 @@ type Flags struct {
 type Config struct {
 	UDP           UDP      `toml:"udp"`
 	HTTP          HTTP     `toml:"http"`
+	OAuth2        OAuth2   `toml:"oauth2"`
 	DB            DB       `toml:"db"`
 	Enrich        Enrich   `toml:"enrich"`
 	Log           Log      `toml:"log"`
@@ -88,14 +89,30 @@ type UDP struct {
 	TimestampSkewSlack time.Duration `toml:"timestamp_skew_slack"`
 }
 
-// HTTP is the API listener. Token is required when Listen is not loopback.
-// The browser never sees Token. QueryCacheTTL and QueryCacheEntries size
-// the API response cache.
+// HTTP is the API listener. Token is accepted and ignored. It is not the
+// API gate. APIPrefix is the REST mount. An empty value means /api/v1.
+// QueryCacheTTL and QueryCacheEntries size the API response cache.
 type HTTP struct {
 	Listen            string        `toml:"listen"`
 	Token             string        `toml:"token"`
+	APIPrefix         string        `toml:"api_prefix"`
 	QueryCacheTTL     time.Duration `toml:"query_cache_ttl"`
 	QueryCacheEntries int           `toml:"query_cache_entries"`
+}
+
+// OAuth2 is the daemon's own authorization server for this UI.
+// There is no external IdP. Issuer defaults to the HTTP listen origin
+// when empty, after flag overrides. UIClientID is the public client for
+// authorization code with PKCE; the browser holds no secret. The same
+// UIClientID is the client id for the client-credentials grant. TokenTTL
+// is the access-token lifetime. ClientSecret is required only when that
+// grant is used. An empty ClientSecret does not disable the UI grant and
+// is not a load error.
+type OAuth2 struct {
+	Issuer       string        `toml:"issuer"`
+	UIClientID   string        `toml:"ui_client_id"`
+	TokenTTL     time.Duration `toml:"token_ttl"`
+	ClientSecret string        `toml:"client_secret"`
 }
 
 // DB is the SQLite file and the writer batch. BusyTimeout is also the DSN
@@ -159,11 +176,18 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // When one of those tables is present, Load records its name on
 // Config.ReservedSeen ("geoip", "asn", "reputation", in that order) and does
 // not log. main logs "enrich.<name>: reserved table, ignored".
-// It returns ErrTokenRequired when http.listen is not loopback and the token
-// is empty. It returns ErrBadConfig when a duration is invalid, including a
-// non-string value or an explicit zero on a retention that has a minimum, a
-// queue depth is less than 1, including an explicit zero, log.level is not
-// a known name, or http.listen is not host:port.
+// http.token is accepted and ignored. An empty token is not an error, on
+// loopback or any other listen address. [oauth2] is a known table. Empty
+// issuer means the HTTP listen origin after flag overrides, ui_client_id
+// defaults to "vibecollector-ui", and token_ttl defaults to 1h.
+// client_secret may be empty; it is required only when the client-credentials
+// grant is used, not at load time. http.api_prefix defaults to /api/v1 when
+// omitted or empty.
+// It returns ErrBadConfig when a duration is invalid, including a
+// non-string value, a negative duration, or an explicit zero on a retention
+// that has a minimum, a queue depth is less than 1, including an explicit
+// zero, log.level is not a known name, http.listen is not host:port, or
+// http.api_prefix is not an absolute path.
 // A missing default file is not an error. A missing file named by ConfigPath,
 // or a file that cannot be read, is returned unwrapped and is not one of the
 // three sentinels.
@@ -182,6 +206,7 @@ func Load(flags Flags) (*Config, error) {
 	}
 	applyDefaults(cfg)
 	applyFlags(cfg, flags)
+	applyIssuer(cfg)
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
@@ -259,6 +284,7 @@ var durationKeys = map[string]struct{}{
 	"udp.timestamp_max_age":     {},
 	"udp.timestamp_skew_slack":  {},
 	"http.query_cache_ttl":      {},
+	"oauth2.token_ttl":          {},
 	"db.busy_timeout":           {},
 	"db.batch_interval":         {},
 	"db.raw_retention":          {},
@@ -473,6 +499,9 @@ func applyDefaults(c *Config) {
 	if c.HTTP.Listen == "" {
 		c.HTTP.Listen = "127.0.0.1:8080"
 	}
+	if c.HTTP.APIPrefix == "" {
+		c.HTTP.APIPrefix = "/api/v1"
+	}
 	if c.HTTP.QueryCacheTTL == 0 {
 		c.HTTP.QueryCacheTTL = 15 * time.Second
 	}
@@ -515,6 +544,21 @@ func applyDefaults(c *Config) {
 	if c.Log.Level == "" {
 		c.Log.Level = "info"
 	}
+	if c.OAuth2.UIClientID == "" {
+		c.OAuth2.UIClientID = "vibecollector-ui"
+	}
+	if c.OAuth2.TokenTTL == 0 {
+		c.OAuth2.TokenTTL = time.Hour
+	}
+}
+
+// applyIssuer fills an empty issuer from http.listen. Flags have already
+// replaced the listen address, so the origin matches the socket main binds.
+// The scheme is http because the daemon does not terminate TLS.
+func applyIssuer(c *Config) {
+	if c.OAuth2.Issuer == "" {
+		c.OAuth2.Issuer = "http://" + c.HTTP.Listen
+	}
 }
 
 func applyFlags(c *Config, f Flags) {
@@ -539,6 +583,7 @@ func validate(c *Config) error {
 		{"udp.timestamp_max_age", c.UDP.TimestampMaxAge, 0},
 		{"udp.timestamp_skew_slack", c.UDP.TimestampSkewSlack, 0},
 		{"http.query_cache_ttl", c.HTTP.QueryCacheTTL, 0},
+		{"oauth2.token_ttl", c.OAuth2.TokenTTL, 0},
 		{"db.busy_timeout", c.DB.BusyTimeout, 0},
 		{"db.batch_interval", c.DB.BatchInterval, 0},
 		{"db.raw_retention", c.DB.RawRetention, time.Minute},
@@ -570,24 +615,29 @@ func validate(c *Config) error {
 	default:
 		return fmt.Errorf("%w: log.level", ErrBadConfig)
 	}
-	loop, err := httpLoopback(c.HTTP.Listen)
-	if err != nil {
-		return err
+	if _, port, err := net.SplitHostPort(c.HTTP.Listen); err != nil || port == "" {
+		return fmt.Errorf("%w: http.listen", ErrBadConfig)
 	}
-	if !loop && c.HTTP.Token == "" {
-		return fmt.Errorf("%w: %s", ErrTokenRequired, c.HTTP.Listen)
+	if err := validatePrefix(c.HTTP.APIPrefix); err != nil {
+		return err
 	}
 	return nil
 }
 
-func httpLoopback(listen string) (bool, error) {
-	host, port, err := net.SplitHostPort(listen)
-	if err != nil || port == "" {
-		return false, fmt.Errorf("%w: http.listen", ErrBadConfig)
+func validatePrefix(p string) error {
+	if len(p) < 2 || p[0] != '/' || p[len(p)-1] == '/' {
+		return fmt.Errorf("%w: http.api_prefix", ErrBadConfig)
 	}
-	addr, err := netip.ParseAddr(host)
-	if err != nil {
-		return false, nil
+	if strings.ContainsAny(p, "?#") || strings.Contains(p, "..") {
+		return fmt.Errorf("%w: http.api_prefix", ErrBadConfig)
 	}
-	return addr.IsLoopback(), nil
+	for i, seg := range strings.Split(p, "/") {
+		if i == 0 {
+			continue
+		}
+		if seg == "" {
+			return fmt.Errorf("%w: http.api_prefix", ErrBadConfig)
+		}
+	}
+	return nil
 }

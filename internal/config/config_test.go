@@ -171,12 +171,12 @@ func TestListenToken(t *testing.T) {
 		{"v4 loopback", "127.0.0.1:8080", "", nil},
 		{"v4 loopback slash8", "127.1.2.3:8080", "", nil},
 		{"v6 loopback", "[::1]:8080", "", nil},
-		{"unspecified v4", "0.0.0.0:8080", "", ErrTokenRequired},
+		{"unspecified v4", "0.0.0.0:8080", "", nil},
 		{"unspecified v4 token", "0.0.0.0:8080", "secret", nil},
-		{"unspecified v6", "[::]:8080", "", ErrTokenRequired},
-		{"public", "203.0.113.4:8080", "", ErrTokenRequired},
+		{"unspecified v6", "[::]:8080", "", nil},
+		{"public", "203.0.113.4:8080", "", nil},
 		{"public token", "203.0.113.4:8080", "secret", nil},
-		{"localhost", "localhost:8080", "", ErrTokenRequired},
+		{"localhost", "localhost:8080", "", nil},
 		{"localhost token", "localhost:8080", "secret", nil},
 		{"missing port", "127.0.0.1", "", ErrBadConfig},
 	}
@@ -258,9 +258,16 @@ func TestDefaults(t *testing.T) {
 	}
 	if cfg.HTTP.Listen != "127.0.0.1:8080" ||
 		cfg.HTTP.Token != "" ||
+		cfg.HTTP.APIPrefix != "/api/v1" ||
 		cfg.HTTP.QueryCacheTTL != 15*time.Second ||
 		cfg.HTTP.QueryCacheEntries != 256 {
 		t.Fatalf("http defaults: %+v", cfg.HTTP)
+	}
+	if cfg.OAuth2.Issuer != "http://127.0.0.1:8080" ||
+		cfg.OAuth2.UIClientID != "vibecollector-ui" ||
+		cfg.OAuth2.TokenTTL != time.Hour ||
+		cfg.OAuth2.ClientSecret != "" {
+		t.Fatalf("oauth defaults: %+v", cfg.OAuth2)
 	}
 	if cfg.DB.Path != "vibecollector.db" ||
 		cfg.DB.BusyTimeout != 5*time.Second ||
@@ -309,6 +316,9 @@ level = "debug"
 	}
 	if cfg.HTTP.Listen != "127.0.0.1:9090" || cfg.UDP.Listen != "10.0.0.1:2055" || cfg.DB.Path != "from-flag.db" {
 		t.Fatalf("flags: http=%s udp=%s db=%s", cfg.HTTP.Listen, cfg.UDP.Listen, cfg.DB.Path)
+	}
+	if cfg.OAuth2.Issuer != "http://127.0.0.1:9090" {
+		t.Fatalf("issuer %s", cfg.OAuth2.Issuer)
 	}
 	if cfg.UDP.DatagramQueue != 8192 {
 		t.Fatalf("absent queue = %d", cfg.UDP.DatagramQueue)
@@ -438,6 +448,51 @@ func TestExplicitQueueKept(t *testing.T) {
 	}
 	if cfg.UDP.DatagramQueue != 1 || cfg.UDP.FlowQueue != 2 || cfg.UDP.WriterQueue != 3 {
 		t.Fatalf("queues %+v", cfg.UDP)
+	}
+}
+
+func TestAPIPrefixAndOAuth(t *testing.T) {
+	path := writeConfig(t, "[http]\napi_prefix = \"\"\n[oauth2]\ntoken_ttl = \"0s\"\nclient_secret = \"s3cret\"\n", 0o600)
+	cfg, err := Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.APIPrefix != "/api/v1" || cfg.OAuth2.TokenTTL != time.Hour || cfg.OAuth2.ClientSecret != "s3cret" {
+		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
+	}
+	path = writeConfig(t, "[http]\napi_prefix = \"/collector/v1\"\n[oauth2]\nissuer = \"http://collector.example\"\ntoken_ttl = \"15m\"\nui_client_id = \"ui\"\n", 0o600)
+	cfg, err = Load(Flags{ConfigPath: path})
+	if err != nil {
+		t.Fatal(err)
+	}
+	if cfg.HTTP.APIPrefix != "/collector/v1" || cfg.OAuth2.Issuer != "http://collector.example" || cfg.OAuth2.TokenTTL != 15*time.Minute || cfg.OAuth2.UIClientID != "ui" {
+		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
+	}
+	bad := []string{
+		"[http]\napi_prefix = \"api/v1\"\n",
+		"[http]\napi_prefix = \"/api/v1/\"\n",
+		"[http]\napi_prefix = \"/api//v1\"\n",
+		"[http]\napi_prefix = \"/api/../v1\"\n",
+		"[http]\napi_prefix = \"/api/v1?x\"\n",
+		"[http]\napi_prefix = \"/api/v1#x\"\n",
+		"[oauth2]\ntoken_ttl = \"-1s\"\n",
+		"[oauth2]\ntoken_ttl = 60\n",
+	}
+	for _, body := range bad {
+		path = writeConfig(t, body, 0o600)
+		_, err = Load(Flags{ConfigPath: path})
+		if !errors.Is(err, ErrBadConfig) {
+			t.Fatalf("%q err = %v", body, err)
+		}
+	}
+	body := "[oauth2]\nclient_secret = \"super-secret-token\"\nnot_a_field = true\n"
+	path = writeConfig(t, body, 0o600)
+	_, err = Load(Flags{ConfigPath: path})
+	if !errors.Is(err, ErrUnknownField) {
+		t.Fatal(err)
+	}
+	if strings.Contains(err.Error(), "super-secret-token") {
+		t.Fatal(err)
 	}
 }
 

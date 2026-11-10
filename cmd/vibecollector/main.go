@@ -4,6 +4,7 @@ import (
 	"context"
 	"errors"
 	"flag"
+	"io/fs"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -13,6 +14,7 @@ import (
 	"time"
 	_ "time/tzdata"
 
+	"vibecollector/internal/api"
 	"vibecollector/internal/config"
 	"vibecollector/internal/decode"
 	_ "vibecollector/internal/decode/ipfix"
@@ -97,6 +99,19 @@ func run(cfg *config.Config) int {
 		}
 		return 1
 	}
+	query, err := store.NewQuery(db)
+	if err != nil {
+		slog.Error("query", "err", err)
+		return 1
+	}
+	httpSrv, err := api.NewServer(cfg.HTTP, cfg.OAuth2, query, counters, emptyFS{})
+	if err != nil {
+		slog.Error("http", "err", err)
+		return 1
+	}
+	// Not a child of the pipeline context: canceling HTTP must not drop the drain.
+	httpCtx, httpCancel := context.WithCancel(context.Background())
+	defer httpCancel()
 
 	// main owns the flow queue. Decode workers send on it and do not call Submit.
 	// Pipeline.Run is the only Submit caller.
@@ -161,6 +176,18 @@ func run(cfg *config.Config) int {
 		// ErrQueueFull is counted inside Run, not here.
 		_ = pipe.Run(pipeCtx, flows, writer)
 	}()
+	var httpWG sync.WaitGroup
+	httpWG.Add(1)
+	go func() {
+		defer httpWG.Done()
+		if err := httpSrv.ListenAndServe(httpCtx); err != nil {
+			slog.Error("http", "err", err)
+			select {
+			case fatalc <- err:
+			default:
+			}
+		}
+	}()
 
 	exit := 0
 	sig := make(chan os.Signal, 2)
@@ -193,10 +220,26 @@ func run(cfg *config.Config) int {
 	}
 	if err := db.Checkpoint(); err != nil {
 		slog.Error("checkpoint", "err", err)
-		return 1
+		exit = 1
+	}
+	httpCancel()
+	httpDone := make(chan struct{})
+	go func() {
+		httpWG.Wait()
+		close(httpDone)
+	}()
+	select {
+	case <-httpDone:
+	case <-time.After(5 * time.Second):
+		slog.Error("http shutdown timed out")
 	}
 	return exit
 }
+
+// emptyFS is the UI tree until the UI package exists. Static files are not the REST API.
+type emptyFS struct{}
+
+func (emptyFS) Open(string) (fs.File, error) { return nil, fs.ErrNotExist }
 
 // newPipeline builds the three stubs and their caches. Each log line is the
 // startup statement that this process does not send addresses anywhere.
