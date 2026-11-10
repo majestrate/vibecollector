@@ -35,9 +35,8 @@ var ErrNilDep = errors.New("nil dependency")
 var ErrBadConfig = errors.New("invalid configuration")
 
 // Writer is the only goroutine that writes flows, exporter deltas, and the
-// additive rollups traffic_1m, asn_1m, and geo_country_5m. It implements
-// flow.Sink. Submit and SubmitDelta are safe for concurrent callers. Run is
-// the single writer.
+// rollups. It implements flow.Sink. Submit and SubmitDelta are safe for
+// concurrent callers. Run is the single writer.
 type Writer struct {
 	db       *DB
 	counters *obs.Counters
@@ -49,6 +48,10 @@ type Writer struct {
 
 	mu      sync.Mutex
 	pending map[deltaKey]flow.ExporterDelta
+
+	// heavy is the open heavy-hitter window. Run is the only goroutine that
+	// touches it. A failed batch leaves it unchanged.
+	heavy heavyState
 }
 
 type deltaKey struct {
@@ -124,16 +127,19 @@ func (w *Writer) SubmitDelta(d flow.ExporterDelta) {
 // A batch starts when batch_size flows are queued or batch_interval elapses,
 // and on that final flush. Each batch is one BEGIN IMMEDIATE transaction:
 // exporter deltas, including the pending map, then the flows, then additive
-// upserts into traffic_1m, asn_1m, and geo_country_5m. A flow is eligible for
+// upserts into traffic_1m, asn_1m, and geo_country_5m, then a replace of the
+// dirty talker, reputation, and geo-path buckets. A flow is eligible for
 // those rollups when its counter semantics are delta and its octet semantics
 // are ip. Total and l4_payload flows are stored and omitted from the rollups.
 // The primary octet value is Flow.Octets; OutOctets is not added again.
-// A SQLite error rolls that batch back, increments sqlite_write_failures,
-// logs the error class, drops the batch, and Run continues with the next one.
-// It does not retry the batch. sqlite_rows_written counts flow rows in a
-// committed batch. The returned error is non-nil only when ctx is done and
-// the last flush fails. A cancelled ctx with a successful last flush, or with
-// nothing left to write, returns nil.
+// asn_1m stays additive until a minute reaches 50,000 distinct ASNs. That
+// minute is then replaced in the same transaction: 50,000 ASNs and one row
+// with ASN -1. A SQLite error rolls the batch back, increments
+// sqlite_write_failures, logs the error class, drops the batch, and Run
+// continues with the next one. It does not retry the batch.
+// sqlite_rows_written counts flow rows in a committed batch. The returned
+// error is non-nil only when ctx is done and the last flush fails. A cancelled
+// ctx with a successful last flush, or with nothing left to write, returns nil.
 func (w *Writer) Run(ctx context.Context) error {
 	n := w.batch
 	if n > writerQueue {
@@ -301,13 +307,21 @@ func (w *Writer) writeBatch(flows []flow.Flow, deltas map[deltaKey]flow.Exporter
 	if err := insertFlows(ctx, conn, flows); err != nil {
 		return err
 	}
-	if err := insertRollups(ctx, conn, rolled); err != nil {
+	next, asnSkip, err := w.heavy.prepare(ctx, conn, flows, rolled.asn)
+	if err != nil {
+		return err
+	}
+	if err := insertRollups(ctx, conn, rolled, asnSkip); err != nil {
+		return err
+	}
+	if err := next.flush(ctx, conn); err != nil {
 		return err
 	}
 	if _, err := conn.ExecContext(ctx, "COMMIT"); err != nil {
 		return err
 	}
 	committed = true
+	w.heavy = next.retain()
 	return nil
 }
 
@@ -477,11 +491,11 @@ ON CONFLICT (bucket_ms, country) DO UPDATE SET
   octets = octets + excluded.octets,
   flows = flows + excluded.flows`
 
-func insertRollups(ctx context.Context, conn *sql.Conn, r rollups) error {
+func insertRollups(ctx context.Context, conn *sql.Conn, r rollups, asnSkip map[int64]struct{}) error {
 	if err := insertTraffic(ctx, conn, r.traffic); err != nil {
 		return err
 	}
-	if err := insertASN(ctx, conn, r.asn); err != nil {
+	if err := insertASN(ctx, conn, r.asn, asnSkip); err != nil {
 		return err
 	}
 	if err := insertNames(ctx, conn, r.names); err != nil {
@@ -507,7 +521,7 @@ func insertTraffic(ctx context.Context, conn *sql.Conn, m map[trafficKey]counts)
 	return nil
 }
 
-func insertASN(ctx context.Context, conn *sql.Conn, m map[asnKey]counts) error {
+func insertASN(ctx context.Context, conn *sql.Conn, m map[asnKey]counts, skip map[int64]struct{}) error {
 	if len(m) == 0 {
 		return nil
 	}
@@ -517,6 +531,9 @@ func insertASN(ctx context.Context, conn *sql.Conn, m map[asnKey]counts) error {
 	}
 	defer stmt.Close()
 	for k, c := range m {
+		if _, ok := skip[k.bucket]; ok {
+			continue
+		}
 		if _, err := stmt.ExecContext(ctx, k.bucket, k.asn, k.direction, k.fromExport, fitInt(c.packets), fitInt(c.octets), fitInt(c.flows)); err != nil {
 			return err
 		}
@@ -601,6 +618,10 @@ type rollups struct {
 	geo     map[geoKey]counts
 }
 
+func rollupEligible(f *flow.Flow) bool {
+	return f.CounterSemantics == "delta" && f.OctetSemantics == "ip"
+}
+
 func fold(flows []flow.Flow) rollups {
 	r := rollups{
 		traffic: make(map[trafficKey]counts),
@@ -610,7 +631,7 @@ func fold(flows []flow.Flow) rollups {
 	}
 	for i := range flows {
 		f := &flows[i]
-		if f.CounterSemantics != "delta" || f.OctetSemantics != "ip" {
+		if !rollupEligible(f) {
 			continue
 		}
 		addTraffic(&r, f)

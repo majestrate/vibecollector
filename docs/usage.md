@@ -58,7 +58,7 @@ Open the web UI and choose a time range. The views read the local database and s
 
 - **Flows** lists individual conversations. Filter by address, port, protocol, exporter, country, ASN, or reputation.
 - **Traffic** shows bytes and packets over time for the current filters.
-- **Top talkers** ranks sources, destinations, and ports for the selected range.
+- **Top talkers** ranks sources and destinations for the selected range.
 - **World map** is a flat map. Countries are shaded by traffic volume, and arcs show the busiest paths between places in the selected range.
 - **Globe** draws those same country totals and paths on a sphere. Rotate and zoom it. Changing the day, the range, or a filter updates the map and the globe together.
 - **ASN** groups addresses by autonomous system.
