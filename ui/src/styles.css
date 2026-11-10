@@ -120,6 +120,16 @@ td {
   background: #fff;
 }
 
+.map {
+  background: #e7eef5;
+}
+
+.map svg {
+  width: 100%;
+  height: auto;
+  display: block;
+}
+
 .strip table {
   font-size: 12px;
 }
