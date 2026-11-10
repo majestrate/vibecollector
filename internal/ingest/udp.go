@@ -155,11 +155,9 @@ func udpSrc(addr *net.UDPAddr) netip.Addr {
 	if addr == nil {
 		return netip.Addr{}
 	}
-	ip, ok := netip.AddrFromSlice(addr.IP)
-	if !ok {
-		return netip.Addr{}
-	}
-	return ip.Unmap()
+	// AddrPort keeps the IPv6 zone. AddrFromSlice would drop it, and two
+	// link-local exporters on different interfaces would share one key.
+	return addr.AddrPort().Addr().Unmap()
 }
 
 func logRCVBUF(conn *net.UDPConn, requested int) {

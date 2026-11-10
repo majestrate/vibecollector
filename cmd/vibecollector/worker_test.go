@@ -1,7 +1,6 @@
 package main
 
 import (
-	"context"
 	"encoding/binary"
 	"net/netip"
 	"sync"
@@ -28,7 +27,7 @@ func TestDecodeWorkerRecordsDelta(t *testing.T) {
 		ReceivedAt: time.Unix(1_700_000_000, 0).UTC(),
 	}
 	close(in)
-	decodeWorker(context.Background(), session, in, flows, sink, counters)
+	decodeWorker(session, in, flows, sink, counters, newIPOrder(), nil)
 	got := <-flows
 	if got.Packets != 42 || got.Version != 5 {
 		t.Fatalf("%+v", got)
@@ -56,7 +55,7 @@ func TestDecodeWorkerDropsFullFlowQueue(t *testing.T) {
 		ReceivedAt: time.Unix(1_700_000_000, 0).UTC(),
 	}
 	close(in)
-	decodeWorker(context.Background(), session, in, flows, sink, counters)
+	decodeWorker(session, in, flows, sink, counters, newIPOrder(), nil)
 	snap := counters.Snapshot()
 	if snap[obs.DroppedEnrichQueue] != 1 || snap[obs.DecodedPackets] != 1 || snap[obs.DecodedFlows] != 1 {
 		t.Fatal(snap[obs.DroppedEnrichQueue], snap[obs.DecodedPackets], snap[obs.DecodedFlows])
@@ -68,20 +67,113 @@ func TestDecodeWorkerDropsFullFlowQueue(t *testing.T) {
 	}
 }
 
-func TestDecodeWorkerStopsOnCancel(t *testing.T) {
+func TestDecodeWorkerDrainsUntilClose(t *testing.T) {
 	session, counters := testSession(t)
-	ctx, cancel := context.WithCancel(context.Background())
-	cancel()
+	in := make(chan ingest.Datagram, 1)
+	flows := make(chan flow.Flow, 1)
 	done := make(chan struct{})
 	go func() {
-		decodeWorker(ctx, session, make(chan ingest.Datagram), make(chan flow.Flow, 1), discardSink{}, counters)
+		decodeWorker(session, in, flows, discardSink{}, counters, newIPOrder(), nil)
 		close(done)
 	}()
 	select {
 	case <-done:
-	case <-time.After(time.Second):
-		t.Fatal("worker stuck")
+		t.Fatal("worker returned before the channel closed")
+	case <-time.After(50 * time.Millisecond):
 	}
+	in <- ingest.Datagram{
+		Payload:    v5One(3),
+		Src:        netip.MustParseAddr("192.0.2.9"),
+		ReceivedAt: time.Unix(1_700_000_000, 0).UTC(),
+	}
+	select {
+	case f := <-flows:
+		if f.Packets != 3 {
+			t.Fatal(f.Packets)
+		}
+	case <-done:
+		t.Fatal("worker returned with a datagram queued")
+	case <-time.After(time.Second):
+		t.Fatal("queued datagram was not decoded")
+	}
+	close(in)
+	select {
+	case <-done:
+	case <-time.After(time.Second):
+		t.Fatal("worker did not stop after close")
+	}
+}
+
+func TestSameIPAcceptedInArrivalOrder(t *testing.T) {
+	ip := netip.MustParseAddr("192.0.2.9")
+	in := make(chan ingest.Datagram, 2)
+	order := newIPOrder()
+	entered := make(chan byte, 2)
+	hold := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			decodeWorker(nil, in, nil, nil, nil, order, func(d ingest.Datagram) {
+				entered <- d.Payload[0]
+				if d.Payload[0] == 1 {
+					<-hold
+				}
+			})
+		}()
+	}
+	in <- ingest.Datagram{Payload: []byte{1}, Src: ip}
+	in <- ingest.Datagram{Payload: []byte{2}, Src: ip}
+	if got := <-entered; got != 1 {
+		t.Fatalf("first %d", got)
+	}
+	select {
+	case got := <-entered:
+		t.Fatalf("later datagram accepted first: %d", got)
+	case <-time.After(150 * time.Millisecond):
+	}
+	close(hold)
+	if got := <-entered; got != 2 {
+		t.Fatalf("second %d", got)
+	}
+	close(in)
+	wg.Wait()
+}
+
+func TestDifferentIPsAcceptInParallel(t *testing.T) {
+	a := netip.MustParseAddr("192.0.2.1")
+	b := netip.MustParseAddr("192.0.2.2")
+	in := make(chan ingest.Datagram, 2)
+	order := newIPOrder()
+	entered := make(chan netip.Addr, 2)
+	release := make(chan struct{})
+	var wg sync.WaitGroup
+	for i := 0; i < 2; i++ {
+		wg.Add(1)
+		go func() {
+			defer wg.Done()
+			decodeWorker(nil, in, nil, nil, nil, order, func(d ingest.Datagram) {
+				entered <- d.Src
+				<-release
+			})
+		}()
+	}
+	in <- ingest.Datagram{Payload: []byte{1}, Src: a}
+	in <- ingest.Datagram{Payload: []byte{1}, Src: b}
+	got := map[netip.Addr]bool{}
+	timeout := time.After(time.Second)
+	for len(got) < 2 {
+		select {
+		case ip := <-entered:
+			got[ip] = true
+		case <-timeout:
+			t.Fatal("different sources did not overlap", got)
+		}
+	}
+	close(release)
+	close(in)
+	wg.Wait()
 }
 
 type recSink struct {

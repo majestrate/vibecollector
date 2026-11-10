@@ -198,6 +198,11 @@ func TestUDPSrcUnmaps(t *testing.T) {
 	if got := udpSrc(nil); got.IsValid() {
 		t.Fatal(got)
 	}
+	zoned := &net.UDPAddr{IP: net.ParseIP("fe80::1"), Port: 2055, Zone: "eth0"}
+	got := udpSrc(zoned)
+	if got != netip.MustParseAddr("fe80::1%eth0") || got.Zone() != "eth0" {
+		t.Fatal(got)
+	}
 }
 
 func waitConn(t *testing.T, r *Reader) *net.UDPConn {

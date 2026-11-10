@@ -5,6 +5,7 @@ import (
 	"errors"
 	"flag"
 	"log/slog"
+	"net/netip"
 	"os"
 	"os/signal"
 	"sync"
@@ -88,6 +89,9 @@ func run(cfg *config.Config) int {
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
 
+	// One ticket sequence per source IP. Dequeue order is Accept order for
+	// that IP; a shared channel alone lets a later datagram win the race.
+	order := newIPOrder()
 	fatalc := make(chan error, 1)
 	var wg sync.WaitGroup
 	wg.Add(1)
@@ -103,7 +107,7 @@ func run(cfg *config.Config) int {
 		wg.Add(1)
 		go func() {
 			defer wg.Done()
-			decodeWorker(ctx, session, datagrams, flows, sink, counters)
+			decodeWorker(session, datagrams, flows, sink, counters, order, nil)
 		}()
 	}
 
@@ -111,6 +115,8 @@ func run(cfg *config.Config) int {
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-sig:
+		// Closing the socket makes Run return and close datagrams.
+		// Workers drain what is already queued; they do not watch ctx.
 		cancel()
 		if !waitStop(&wg, sig) {
 			return 1
@@ -138,22 +144,90 @@ func newSession(cfg *config.Config, counters *obs.Counters) (*decode.Session, er
 	return decode.NewSession(templates, hold, sampling.NewCache(), sequence.NewTable(), counters, cfg.UDP.TimestampMaxAge, cfg.UDP.TimestampSkewSlack)
 }
 
-// decodeWorker reads datagrams until ctx is cancelled or in is closed.
+// decodeWorker reads until in is closed. It does not stop on context
+// cancellation: a datagram already queued is still decoded. The reader
+// closes in after the socket stops, and the process gives that drain 5 seconds.
 // A full flows send increments dropped_enrich_queue and continues.
 // The send is non-blocking so a stalled enrich queue cannot stall the socket.
 // Submit is not called. SubmitDelta takes the packet delta and each gap.
-func decodeWorker(ctx context.Context, session *decode.Session, in <-chan ingest.Datagram, flows chan<- flow.Flow, sink flow.Sink, counters *obs.Counters) {
-	for {
-		select {
-		case <-ctx.Done():
-			return
-		case d, ok := <-in:
-			if !ok {
-				return
-			}
+// accept, when non-nil, replaces Session.Accept. Production passes nil.
+func decodeWorker(session *decode.Session, in <-chan ingest.Datagram, flows chan<- flow.Flow, sink flow.Sink, counters *obs.Counters, order *ipOrder, accept func(ingest.Datagram)) {
+	if accept == nil {
+		accept = func(d ingest.Datagram) {
 			deliver(session, d, flows, sink, counters)
 		}
 	}
+	for {
+		d, release, ok := order.dequeue(in)
+		if !ok {
+			return
+		}
+		accept(d)
+		release()
+	}
+}
+
+// ipOrder is a per-source ticket taken at dequeue. Accept for one IP runs
+// in arrival order. Different IPs do not wait on each other.
+type ipOrder struct {
+	mu   sync.Mutex
+	cond *sync.Cond
+	recv sync.Mutex
+	next map[netip.Addr]uint64
+	seq  map[netip.Addr]uint64
+}
+
+func newIPOrder() *ipOrder {
+	o := &ipOrder{
+		next: make(map[netip.Addr]uint64),
+		seq:  make(map[netip.Addr]uint64),
+	}
+	o.cond = sync.NewCond(&o.mu)
+	return o
+}
+
+// dequeue receives one datagram and blocks until earlier datagrams for that
+// source have finished. The receive lock is not held across that wait.
+func (o *ipOrder) dequeue(in <-chan ingest.Datagram) (ingest.Datagram, func(), bool) {
+	o.recv.Lock()
+	d, ok := <-in
+	if !ok {
+		o.recv.Unlock()
+		return ingest.Datagram{}, nil, false
+	}
+	// Issue under the receive lock so the ticket matches dequeue order,
+	// not whichever worker reaches Accept first.
+	ticket := o.issue(d.Src)
+	o.recv.Unlock()
+	o.wait(d.Src, ticket)
+	return d, func() { o.release(d.Src) }, true
+}
+
+func (o *ipOrder) issue(ip netip.Addr) uint64 {
+	o.mu.Lock()
+	defer o.mu.Unlock()
+	n := o.seq[ip]
+	o.seq[ip] = n + 1
+	return n
+}
+
+func (o *ipOrder) wait(ip netip.Addr, ticket uint64) {
+	o.mu.Lock()
+	for o.next[ip] != ticket {
+		o.cond.Wait()
+	}
+	o.mu.Unlock()
+}
+
+func (o *ipOrder) release(ip netip.Addr) {
+	o.mu.Lock()
+	o.next[ip]++
+	if o.next[ip] == o.seq[ip] {
+		delete(o.next, ip)
+		delete(o.seq, ip)
+	}
+	o.cond.Broadcast()
+	o.mu.Unlock()
 }
 
 func deliver(session *decode.Session, d ingest.Datagram, flows chan<- flow.Flow, sink flow.Sink, counters *obs.Counters) {
