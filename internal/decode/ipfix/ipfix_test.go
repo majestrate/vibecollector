@@ -792,6 +792,123 @@ func TestSizedRetryDoesNotObserveAgain(t *testing.T) {
 	}
 }
 
+func TestOptionsWithoutSamplingDoesNotClearRate(t *testing.T) {
+	templates, samples, _, _ := newState(t)
+	rate := ipfixMsg(7, 0,
+		setOf(3, optBody(400, 1, [][2]uint16{{1, 2}, {34, 4}})),
+		setOf(400, append(be16(1), be32(100)...)),
+	)
+	if _, _, _, err := parse(t, rate, templates, samples, nil, nil, false, testAge, testSkew); err != nil {
+		t.Fatal(err)
+	}
+	boot := ipfixMsg(7, 0,
+		setOf(3, optBody(401, 1, [][2]uint16{{1, 2}, {160, 8}})),
+		setOf(401, append(be16(1), be64(1_000_000_000_000)...)),
+	)
+	if _, _, _, err := parse(t, boot, templates, samples, nil, nil, false, testAge, testSkew); err != nil {
+		t.Fatal(err)
+	}
+	got, ok := samples.Lookup(testSrc, 7, []string{"device"})
+	if !ok || got.N != 100 {
+		t.Fatal(got, ok)
+	}
+	ms, ok := lookupBoot(testSrc, 7)
+	if !ok || ms != 1_000_000_000_000 {
+		t.Fatal(ms, ok)
+	}
+}
+
+func TestAlgorithmAppliedWhenNIsZero(t *testing.T) {
+	templates, samples, _, _ := newState(t)
+	pkt := ipfixMsg(7, 0,
+		setOf(3, optBody(400, 1, [][2]uint16{{1, 2}, {35, 1}})),
+		setOf(400, append(be16(1), 2)),
+		setOf(2, templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {2, 4}})),
+		setOf(256, rec3(0x0a000001, 0x0a000002, 4)),
+	)
+	flows, _, _, err := parse(t, pkt, templates, samples, nil, nil, false, testAge, testSkew)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if f.Sampled || f.SamplingInterval != nil || f.SamplingAlgorithm == nil || *f.SamplingAlgorithm != 2 || f.Packets != 4 {
+		t.Fatalf("sampled %v interval %v algo %v packets %d", f.Sampled, f.SamplingInterval, f.SamplingAlgorithm, f.Packets)
+	}
+}
+
+func TestRetryDoesNotReapplyWithdrawal(t *testing.T) {
+	templates, _, _, _ := newState(t)
+	pkt := ipfixMsg(7, 1,
+		setOf(256, rec3(0x0a000001, 0x0a000002, 4)),
+		setOf(2, append(be16(256), be16(0)...)),
+	)
+	if _, _, missing, err := parse(t, pkt, templates, nil, nil, nil, false, testAge, testSkew); err != nil || missing == nil {
+		t.Fatal(err, missing != nil)
+	}
+	if _, _, err := templates.Put(template.Key{Exporter: testSrc, Domain: 7, Version: 10, ID: 256}, threeFields()); err != nil {
+		t.Fatal(err)
+	}
+	flows, _, missing, err := parse(t, pkt, templates, nil, nil, nil, true, testAge, testSkew)
+	if err != nil || missing != nil || len(flows) != 1 || flows[0].Packets != 4 {
+		t.Fatal(err, missing != nil, flows)
+	}
+	if _, ok := templates.Get(template.Key{Exporter: testSrc, Domain: 7, Version: 10, ID: 256}); !ok {
+		t.Fatal("withdrawal replayed")
+	}
+}
+
+func TestRetryDoesNotReplaceTemplate(t *testing.T) {
+	templates, _, _, _ := newState(t)
+	pkt := ipfixMsg(7, 1,
+		setOf(300, rec3(0x0a000001, 0x0a000002, 7)),
+		setOf(2, templateBody(300, [][2]uint16{{1, 4}, {1, 4}, {1, 4}})),
+		setOf(256, rec3(1, 2, 1)),
+	)
+	if _, _, missing, err := parse(t, pkt, templates, nil, nil, nil, false, testAge, testSkew); err != nil || missing == nil {
+		t.Fatal(err, missing != nil)
+	}
+	if _, _, err := templates.Put(template.Key{Exporter: testSrc, Domain: 7, Version: 10, ID: 300}, threeFields()); err != nil {
+		t.Fatal(err)
+	}
+	flows, _, _, err := parse(t, pkt, templates, nil, nil, nil, true, testAge, testSkew)
+	if err != nil || len(flows) != 1 || flows[0].Packets != 7 {
+		t.Fatal(err, flows)
+	}
+	tpl, ok := templates.Get(template.Key{Exporter: testSrc, Domain: 7, Version: 10, ID: 300})
+	if !ok || len(tpl.Fields) == 0 || tpl.Fields[0].Type != 8 {
+		t.Fatal(tpl, ok)
+	}
+}
+
+func TestDiscardedHoldDropsSnapshot(t *testing.T) {
+	resetState()
+	templates, err := template.NewCache(64)
+	if err != nil {
+		t.Fatal(err)
+	}
+	h, err := template.NewHold(1, 8)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s, err := decode.NewSession(templates, h, sampling.NewCache(), sequence.NewTable(), obs.NewCounters(), testAge, testSkew)
+	if err != nil {
+		t.Fatal(err)
+	}
+	s.Accept(ingest.Datagram{Payload: ipfixMsg(7, 5, setOf(2, templateBody(300, [][2]uint16{{8, 4}, {12, 4}, {2, 4}}))), Src: testSrc, ReceivedAt: testAt})
+	s.Accept(ingest.Datagram{Payload: ipfixMsg(7, 10, setOf(256, rec3(1, 2, 1))), Src: testSrc, ReceivedAt: testAt})
+	s.Accept(ingest.Datagram{Payload: ipfixMsg(7, 11, setOf(257, rec3(1, 2, 2))), Src: testSrc, ReceivedAt: testAt})
+	if _, ok := seqHolds[seqHoldKey{ip: testSrc, domain: 7, seq: 10}]; ok {
+		t.Fatal("discarded sequence snapshot still stored")
+	}
+	entries := h.List(testSrc)
+	if len(entries) != 1 || len(byID) != 1 {
+		t.Fatalf("holds %d snapshots %d", len(entries), len(byID))
+	}
+	if _, ok := byID[entries[0].ID]; !ok {
+		t.Fatal("survivor snapshot missing")
+	}
+}
+
 func prefixSetup(t *testing.T) (*template.Cache, *sequence.Table, *obs.Counters, []byte) {
 	t.Helper()
 	templates, _, seq, counters := newState(t)

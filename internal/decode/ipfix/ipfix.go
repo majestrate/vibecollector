@@ -30,10 +30,11 @@ const (
 // templates, samples, and seq are called through their exported methods.
 // retry true means Session is replaying a held datagram. missing_template
 // and malformed are not incremented again, and a sequence number already
-// counted is not passed to Observe again. When the replay can now be sized,
-// Parse calls sequence.Table.ApplyIfUnchanged with the snapshot
-// ObserveUnresolved saved for this exporter, domain, and sequence. The gap
-// is applied only when expected is still that saved value.
+// counted is not passed to Observe again. Template and withdrawal sets are
+// not applied again; they were applied on first sight. When the replay can
+// now be sized, Parse calls sequence.Table.ApplyIfUnchanged with the
+// snapshot saved for this hold. The gap is applied only when expected is
+// still that saved value.
 // maxAge and skew are timestamp_max_age and timestamp_skew_slack. Zero is
 // not replaced. maxAge bounds the IE 160 wrap and the receive-window clamp.
 // skew is only the clamp's future edge.
@@ -150,10 +151,12 @@ func (p *parser) decode() ([]flow.Flow, flow.ExporterDelta, *template.Pending, e
 		}
 		body := msg[off+4 : end]
 		switch {
-		case id == 2:
-			p.templateSet(body, false)
-		case id == 3:
-			p.templateSet(body, true)
+		case id == 2 || id == 3:
+			// A withdrawal or a stale definition in this suffix must not
+			// replace a template installed after the datagram was held.
+			if !p.retry {
+				p.templateSet(body, id == 3)
+			}
 		case id < 256:
 			p.countOnce(obs.ReservedSet, 1)
 		default:
@@ -391,6 +394,11 @@ func (p *parser) optionsData(tpl template.Template, v values) {
 	if p.samples == nil {
 		return
 	}
+	// Put replaces the whole fact. An options record with no sampling IE,
+	// such as IE 160 alone, must not clear a rate. emit stored IE 160 first.
+	if !v.hasSampling {
+		return
+	}
 	keys := append([]string(nil), v.scopeKeys...)
 	if v.sampler != nil {
 		keys = append(keys, "sampler:"+strconv.FormatUint(*v.sampler, 10))
@@ -615,10 +623,11 @@ func (p *parser) applyCachedRate(v values, in *sampling.Input) {
 	facts := p.samples.Facts(p.exporter, p.domain)
 	for _, scope := range flowScopes(v, facts) {
 		s, ok := facts[scope]
-		if !ok || s.N == 0 {
+		if !ok || (s.N == 0 && s.Algorithm == 0) {
 			continue
 		}
-		if needN {
+		// N == 0 still carries an algorithm. Skipping the fact would drop it.
+		if needN && s.N > 0 {
 			in.Interval = ptrU64(uint64(s.N))
 			needN = false
 		}
@@ -703,6 +712,15 @@ func (p *parser) finishSequence() error {
 		return nil
 	}
 	key := sequence.Key{Exporter: p.exporter, Domain: p.domain, Version: 10}
+	if p.retry {
+		if st, id, ok := takeArmed(p.exporter); ok {
+			if p.unsized {
+				return nil
+			}
+			dropHoldID(id)
+			return p.applyHeld(key, st)
+		}
+	}
 	if p.unsized {
 		if p.retry {
 			return nil
@@ -720,21 +738,25 @@ func (p *parser) finishSequence() error {
 		if !ok {
 			return nil
 		}
-		count := p.dataRecords
-		if len(p.d.Payload) < st.payloadLen {
-			count += st.prefix
-		}
-		dec, applied := p.seq.ApplyIfUnchanged(key, st.snap, count)
-		if applied {
-			p.noteSeq(dec)
-		}
-		return nil
+		return p.applyHeld(key, st)
 	}
 	dec, err := p.seq.Observe(key, p.headerSeq, p.dataRecords)
 	if err != nil {
 		return err
 	}
 	p.noteSeq(dec)
+	return nil
+}
+
+func (p *parser) applyHeld(key sequence.Key, st seqHold) error {
+	count := p.dataRecords
+	if len(p.d.Payload) < st.payloadLen {
+		count += st.prefix
+	}
+	dec, applied := p.seq.ApplyIfUnchanged(key, st.snap, count)
+	if applied {
+		p.noteSeq(dec)
+	}
 	return nil
 }
 
@@ -1307,10 +1329,28 @@ type seqHold struct {
 	payloadLen int
 }
 
+// holdSnap is one hold entry's snapshot. The sequence number is not the key:
+// two unresolved messages can carry the same sequence.
+type holdSnap struct {
+	seqHold
+	ip     netip.Addr
+	domain uint32
+	seq    uint32
+}
+
+type armState struct {
+	id uint64
+	st seqHold
+	on bool
+}
+
 var (
 	stateMu   sync.Mutex
 	bootTimes = map[bootKey]uint64{}
 	seqHolds  = map[seqHoldKey]seqHold{}
+	stash     = map[netip.Addr]holdSnap{}
+	byID      = map[uint64]holdSnap{}
+	armed     = map[netip.Addr]armState{}
 )
 
 func storeBoot(ip netip.Addr, domain uint32, ms uint64) {
@@ -1329,9 +1369,12 @@ func lookupBoot(ip netip.Addr, domain uint32) (uint64, bool) {
 func saveHold(ip netip.Addr, domain, seq uint32, snap sequence.Snapshot, prefix uint32, payloadLen int) {
 	stateMu.Lock()
 	defer stateMu.Unlock()
-	seqHolds[seqHoldKey{ip: ip.Unmap(), domain: domain, seq: seq}] = seqHold{
-		snap: snap, prefix: prefix, payloadLen: payloadLen,
-	}
+	ip = ip.Unmap()
+	st := seqHold{snap: snap, prefix: prefix, payloadLen: payloadLen}
+	// Direct Parse retries have no hold id and still find this slot.
+	// Session.Bind removes it so the next message cannot replace it.
+	seqHolds[seqHoldKey{ip: ip, domain: domain, seq: seq}] = st
+	stash[ip] = holdSnap{seqHold: st, ip: ip, domain: domain, seq: seq}
 }
 
 func takeHold(ip netip.Addr, domain, seq uint32) (seqHold, bool) {
@@ -1343,6 +1386,75 @@ func takeHold(ip netip.Addr, domain, seq uint32) (seqHold, bool) {
 		delete(seqHolds, k)
 	}
 	return st, ok
+}
+
+func bindHold(ip netip.Addr, id uint64) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	ip = ip.Unmap()
+	st, ok := stash[ip]
+	if !ok {
+		return
+	}
+	delete(stash, ip)
+	byID[id] = st
+	delete(seqHolds, seqHoldKey{ip: ip, domain: st.domain, seq: st.seq})
+}
+
+func dropHoldID(id uint64) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	delete(byID, id)
+}
+
+func retainHolds(ip netip.Addr, live []uint64) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	ip = ip.Unmap()
+	keep := make(map[uint64]struct{}, len(live))
+	for _, id := range live {
+		keep[id] = struct{}{}
+	}
+	for id, st := range byID {
+		if st.ip != ip {
+			continue
+		}
+		if _, ok := keep[id]; !ok {
+			delete(byID, id)
+		}
+	}
+}
+
+func armRetry(ip netip.Addr, id uint64, snap sequence.Snapshot) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	ip = ip.Unmap()
+	st, ok := byID[id]
+	if !ok {
+		delete(armed, ip)
+		return
+	}
+	// Pending.SeqSnap is this entry's snapshot, not the shared sequence slot.
+	st.snap = snap
+	armed[ip] = armState{id: id, st: st.seqHold, on: true}
+}
+
+func takeArmed(ip netip.Addr) (seqHold, uint64, bool) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	ip = ip.Unmap()
+	a, ok := armed[ip]
+	if !ok || !a.on {
+		return seqHold{}, 0, false
+	}
+	delete(armed, ip)
+	return a.st, a.id, true
+}
+
+func clearArm(ip netip.Addr) {
+	stateMu.Lock()
+	defer stateMu.Unlock()
+	delete(armed, ip.Unmap())
 }
 
 func forgetExporter(ip netip.Addr) {
@@ -1359,6 +1471,13 @@ func forgetExporter(ip netip.Addr) {
 			delete(seqHolds, k)
 		}
 	}
+	delete(stash, ip)
+	delete(armed, ip)
+	for id, st := range byID {
+		if st.ip == ip {
+			delete(byID, id)
+		}
+	}
 }
 
 func resetState() {
@@ -1366,9 +1485,19 @@ func resetState() {
 	defer stateMu.Unlock()
 	bootTimes = map[bootKey]uint64{}
 	seqHolds = map[seqHoldKey]seqHold{}
+	stash = map[netip.Addr]holdSnap{}
+	byID = map[uint64]holdSnap{}
+	armed = map[netip.Addr]armState{}
 }
 
 func init() {
 	decode.RegisterIPFIXParser(Parse)
 	decode.RegisterExporterForget(forgetExporter)
+	decode.RegisterIPFIXHold(decode.IPFIXHoldOps{
+		Bind:   bindHold,
+		Drop:   dropHoldID,
+		Retain: retainHolds,
+		Arm:    armRetry,
+		Clear:  clearArm,
+	})
 }

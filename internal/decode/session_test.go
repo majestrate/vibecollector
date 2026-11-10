@@ -54,19 +54,19 @@ func TestDispatchUnknownAndV5(t *testing.T) {
 	s, _, _, _, _, counters := session(t, 8, 8, 8)
 	at := time.Unix(1_700_000_000, 0).UTC()
 	ip := netip.MustParseAddr("192.0.2.5")
-	_, delta := s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x04}, Src: ip, ReceivedAt: at})
+	_, delta, _ := s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x04}, Src: ip, ReceivedAt: at})
 	if delta.Version != 0 || delta.Domain != 0 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != 1 {
 		t.Fatal(delta)
 	}
-	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x0a}, Src: ip, ReceivedAt: at})
+	_, delta, _ = s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x0a}, Src: ip, ReceivedAt: at})
 	if delta.Version != 10 || delta.Domain != 0 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != 2 {
 		t.Fatal(delta, counters.Snapshot()[obs.Malformed])
 	}
-	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0}, Src: ip, ReceivedAt: at})
+	_, delta, _ = s.Accept(ingest.Datagram{Payload: []byte{0}, Src: ip, ReceivedAt: at})
 	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 3 {
 		t.Fatal(delta, counters.Snapshot()[obs.Malformed])
 	}
-	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0, 7}, Src: ip, ReceivedAt: at})
+	_, delta, _ = s.Accept(ingest.Datagram{Payload: []byte{0, 7}, Src: ip, ReceivedAt: at})
 	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 4 {
 		t.Fatal(delta)
 	}
@@ -77,7 +77,7 @@ func TestDispatchUnknownAndV5(t *testing.T) {
 	v5pkt[20], v5pkt[21] = 1, 2
 	binary.BigEndian.PutUint16(v5pkt[22:24], 0xC064)
 	binary.BigEndian.PutUint32(v5pkt[24+16:24+20], 42)
-	flows, delta := s.Accept(ingest.Datagram{Payload: v5pkt, Src: ip, ReceivedAt: at})
+	flows, delta, _ := s.Accept(ingest.Datagram{Payload: v5pkt, Src: ip, ReceivedAt: at})
 	if delta.Version != 5 || delta.Domain != 258 || len(flows) != 1 || flows[0].Packets != 42 || !flows[0].Sampled {
 		t.Fatalf("delta %+v flows %d", delta, len(flows))
 	}
@@ -87,7 +87,7 @@ func TestDispatchUnknownAndV5(t *testing.T) {
 	short := make([]byte, 24)
 	copy(short, v5pkt[:24])
 	before := counters.Snapshot()[obs.Malformed]
-	_, delta = s.Accept(ingest.Datagram{Payload: short, Src: ip, ReceivedAt: at})
+	_, delta, _ = s.Accept(ingest.Datagram{Payload: short, Src: ip, ReceivedAt: at})
 	if delta.Version != 5 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != before+1 {
 		t.Fatal("short v5 counted twice", delta, counters.Snapshot()[obs.Malformed], before)
 	}
@@ -98,11 +98,11 @@ func TestDataBeforeTemplateDrains(t *testing.T) {
 	pkts := framed(t, "v9_data_before_template.bin")
 	ip := netip.MustParseAddr("192.0.2.8")
 	at := time.Unix(1_700_000_000, 0).UTC()
-	flows, delta := s.Accept(ingest.Datagram{Payload: pkts[0], Src: ip, ReceivedAt: at})
+	flows, delta, _ := s.Accept(ingest.Datagram{Payload: pkts[0], Src: ip, ReceivedAt: at})
 	if len(flows) != 0 || delta.MissingTemplate != 1 || len(hold.List(ip)) != 1 {
 		t.Fatalf("flows %d missing %d hold %d", len(flows), delta.MissingTemplate, len(hold.List(ip)))
 	}
-	flows, delta = s.Accept(ingest.Datagram{Payload: pkts[1], Src: ip, ReceivedAt: at})
+	flows, delta, _ = s.Accept(ingest.Datagram{Payload: pkts[1], Src: ip, ReceivedAt: at})
 	if len(flows) != 1 || flows[0].Packets != 9 || flows[0].Src.String() != "203.0.113.10" || len(hold.List(ip)) != 0 {
 		t.Fatalf("flows %d hold %d delta %+v", len(flows), len(hold.List(ip)), delta)
 	}
@@ -137,7 +137,7 @@ func TestHoldFullDroppedTemplate(t *testing.T) {
 	if binary.BigEndian.Uint32(entries[0].Payload[32:36]) != 2 || binary.BigEndian.Uint32(entries[255].Payload[32:36]) != 257 {
 		t.Fatal("oldest datagram was not the one dropped")
 	}
-	flows, _ := s.Accept(ingest.Datagram{Payload: templatePacket(4, 257, 256), Src: ip, ReceivedAt: at})
+	flows, _, _ := s.Accept(ingest.Datagram{Payload: templatePacket(4, 257, 256), Src: ip, ReceivedAt: at})
 	if len(flows) != 256 || flows[0].Packets != 2 || flows[255].Packets != 257 {
 		t.Fatalf("drained %d %v", len(flows), packetsOf(flows))
 	}
@@ -161,7 +161,7 @@ func TestPartialEmitRetriesSuffix(t *testing.T) {
 	pkt := append(v9Header(3, 0, 1_700_000_000, 1, 1), flowSet(256, rec(1))...)
 	pkt = append(pkt, flowSet(999, rec(2))...)
 	pkt = append(pkt, flowSet(256, rec(3))...)
-	flows, _ := s.Accept(ingest.Datagram{Payload: pkt, Src: ip, ReceivedAt: at})
+	flows, _, _ := s.Accept(ingest.Datagram{Payload: pkt, Src: ip, ReceivedAt: at})
 	if len(flows) != 1 || flows[0].Packets != 1 {
 		t.Fatalf("first sight %v", flows)
 	}
@@ -172,7 +172,7 @@ func TestPartialEmitRetriesSuffix(t *testing.T) {
 	if counters.Snapshot()[obs.MissingTemplate] != 1 {
 		t.Fatal(counters.Snapshot()[obs.MissingTemplate])
 	}
-	flows, _ = s.Accept(ingest.Datagram{Payload: templatePacket(1, 2, 999), Src: ip, ReceivedAt: at})
+	flows, _, _ = s.Accept(ingest.Datagram{Payload: templatePacket(1, 2, 999), Src: ip, ReceivedAt: at})
 	if len(flows) != 2 || flows[0].Packets != 2 || flows[1].Packets != 3 {
 		t.Fatalf("retry %v", packetsOf(flows))
 	}
@@ -409,7 +409,7 @@ func TestIPFIXHoldRewritesLength(t *testing.T) {
 	binary.BigEndian.PutUint32(rec[4:8], 0xC6336414)
 	binary.BigEndian.PutUint32(rec[8:12], 6)
 	data := ipfixPacket(11, 0, flowSet(4, []byte{0, 0, 0, 0}), flowSet(256, rec))
-	flows, delta := s.Accept(ingest.Datagram{Payload: data, Src: ip, ReceivedAt: at})
+	flows, delta, _ := s.Accept(ingest.Datagram{Payload: data, Src: ip, ReceivedAt: at})
 	if len(flows) != 0 || delta.MissingTemplate != 1 || delta.Version != 10 || len(hold.List(ip)) != 1 {
 		t.Fatalf("flows %d delta %+v hold %d", len(flows), delta, len(hold.List(ip)))
 	}
@@ -429,7 +429,7 @@ func TestIPFIXHoldRewritesLength(t *testing.T) {
 	for i, v := range pairs {
 		binary.BigEndian.PutUint16(body[4+2*i:6+2*i], v)
 	}
-	flows, delta = s.Accept(ingest.Datagram{Payload: ipfixPacket(11, 0, flowSet(2, body)), Src: ip, ReceivedAt: at})
+	flows, delta, _ = s.Accept(ingest.Datagram{Payload: ipfixPacket(11, 0, flowSet(2, body)), Src: ip, ReceivedAt: at})
 	if len(flows) != 1 || flows[0].Packets != 6 || flows[0].Src.String() != "203.0.113.10" || flows[0].Version != 10 || len(hold.List(ip)) != 0 {
 		t.Fatalf("flows %d hold %d delta %+v", len(flows), len(hold.List(ip)), delta)
 	}
@@ -438,6 +438,106 @@ func TestIPFIXHoldRewritesLength(t *testing.T) {
 	}
 	if _, ok := templates.Get(template.Key{Exporter: ip, Domain: 11, Version: 10, ID: 256}); !ok {
 		t.Fatal("template")
+	}
+}
+
+func TestIPFIXDrainGapRecords(t *testing.T) {
+	s, templates, _, _, _, _ := session(t, 64, 8, 8)
+	ip := netip.MustParseAddr("192.0.2.61")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	rec := func(pkts uint32) []byte {
+		b := make([]byte, 12)
+		binary.BigEndian.PutUint32(b[0:4], 0x0a000001)
+		binary.BigEndian.PutUint32(b[4:8], 0x0a000002)
+		binary.BigEndian.PutUint32(b[8:12], pkts)
+		return b
+	}
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(9, 0, ipfixTemplateSet(300)), Src: ip, ReceivedAt: at})
+	flows, delta, gaps := s.Accept(ingest.Datagram{Payload: ipfixPacket(9, 4, flowSet(256, rec(3))), Src: ip, ReceivedAt: at})
+	if len(flows) != 0 || delta.GapRecords != 0 || len(gaps) != 0 || delta.MissingTemplate != 1 {
+		t.Fatalf("first sight flows %d delta %+v gaps %d", len(flows), delta, len(gaps))
+	}
+	flows, delta, gaps = s.Accept(ingest.Datagram{Payload: ipfixPacket(9, 0, ipfixTemplateSet(256)), Src: ip, ReceivedAt: at})
+	if delta.GapRecords != 4 || len(gaps) != 0 || delta.Packets != 1 || delta.Malformed != 0 || delta.MissingTemplate != 0 {
+		t.Fatalf("same domain delta %+v gaps %+v", delta, gaps)
+	}
+	if len(flows) != 1 || flows[0].Packets != 3 {
+		t.Fatal(packetsOf(flows))
+	}
+
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(4, 0, ipfixTemplateSet(300)), Src: ip, ReceivedAt: at})
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(4, 4, flowSet(256, rec(8))), Src: ip, ReceivedAt: at})
+	if _, _, err := templates.Put(template.Key{Exporter: ip, Domain: 4, Version: 10, ID: 256}, template.Template{
+		Fields:   []template.Field{{Type: 8, Length: 4}, {Type: 12, Length: 4}, {Type: 2, Length: 4}},
+		Received: at,
+	}); err != nil {
+		t.Fatal(err)
+	}
+	flows, delta, gaps = s.Accept(ingest.Datagram{Payload: ipfixPacket(8, 0), Src: ip, ReceivedAt: at})
+	if delta.Domain != 8 || delta.GapRecords != 0 || delta.Packets != 1 || len(gaps) != 1 {
+		t.Fatalf("other domain delta %+v gaps %+v", delta, gaps)
+	}
+	g := gaps[0]
+	if g.Domain != 4 || g.GapRecords != 4 || g.Packets != 0 || g.Malformed != 0 || g.MissingTemplate != 0 || g.Flows != 0 {
+		t.Fatalf("gap delta %+v", g)
+	}
+	if len(flows) != 1 || flows[0].Packets != 8 || flows[0].Domain != 4 {
+		t.Fatal(flows)
+	}
+}
+
+func TestIPFIXReplayStopsAtMessageLength(t *testing.T) {
+	s, _, _, _, _, _ := session(t, 64, 8, 8)
+	ip := netip.MustParseAddr("192.0.2.62")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	rec := make([]byte, 12)
+	binary.BigEndian.PutUint32(rec[0:4], 0x0a000001)
+	binary.BigEndian.PutUint32(rec[4:8], 0x0a000002)
+	binary.BigEndian.PutUint32(rec[8:12], 6)
+	data := ipfixPacket(11, 0, flowSet(4, []byte{0, 0, 0, 0}), flowSet(256, rec))
+	trailer := make([]byte, 12)
+	binary.BigEndian.PutUint32(trailer[0:4], 0x0a000001)
+	binary.BigEndian.PutUint32(trailer[4:8], 0x0a000002)
+	binary.BigEndian.PutUint32(trailer[8:12], 999)
+	data = append(data, flowSet(256, trailer)...)
+	if _, delta, _ := s.Accept(ingest.Datagram{Payload: data, Src: ip, ReceivedAt: at}); delta.MissingTemplate != 1 {
+		t.Fatal(delta)
+	}
+	flows, _, _ := s.Accept(ingest.Datagram{Payload: ipfixPacket(11, 0, ipfixTemplateSet(256)), Src: ip, ReceivedAt: at})
+	if len(flows) != 1 || flows[0].Packets != 6 {
+		t.Fatalf("trailer became a set: %v", packetsOf(flows))
+	}
+}
+
+func TestIPFIXSnapshotFollowsHold(t *testing.T) {
+	s, _, hold, _, _, counters := session(t, 64, 8, 8)
+	ip := netip.MustParseAddr("192.0.2.63")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	rec := func(pkts uint32) []byte {
+		b := make([]byte, 12)
+		binary.BigEndian.PutUint32(b[0:4], 0x0a000001)
+		binary.BigEndian.PutUint32(b[4:8], 0x0a000002)
+		binary.BigEndian.PutUint32(b[8:12], pkts)
+		return b
+	}
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 5, ipfixTemplateSet(300)), Src: ip, ReceivedAt: at})
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 10, flowSet(256, rec(1))), Src: ip, ReceivedAt: at})
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 5, flowSet(300, rec(9))), Src: ip, ReceivedAt: at})
+	two := append(rec(2), rec(3)...)
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 10, flowSet(256, two)), Src: ip, ReceivedAt: at})
+	if len(hold.List(ip)) != 2 {
+		t.Fatal(len(hold.List(ip)))
+	}
+	flows, delta, _ := s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 6, ipfixTemplateSet(256)), Src: ip, ReceivedAt: at})
+	if len(flows) != 3 || delta.GapRecords != 4 {
+		t.Fatalf("flows %v delta %+v", packetsOf(flows), delta)
+	}
+	if counters.Snapshot()[obs.SequenceGapIPFIXRecords] != 4 {
+		t.Fatal(counters.Snapshot()[obs.SequenceGapIPFIXRecords])
+	}
+	_, probe, _ := s.Accept(ingest.Datagram{Payload: ipfixPacket(7, 12), Src: ip, ReceivedAt: at})
+	if probe.GapRecords != 0 || counters.Snapshot()[obs.SequenceGapIPFIXRecords] != 4 {
+		t.Fatalf("older hold used the newer snapshot: probe %+v counter %d", probe, counters.Snapshot()[obs.SequenceGapIPFIXRecords])
 	}
 }
 
@@ -478,6 +578,17 @@ func framed(t *testing.T, name string) [][]byte {
 		b = b[n:]
 	}
 	return out
+}
+
+func ipfixTemplateSet(id uint16) []byte {
+	body := make([]byte, 16)
+	binary.BigEndian.PutUint16(body[0:2], id)
+	binary.BigEndian.PutUint16(body[2:4], 3)
+	pairs := []uint16{8, 4, 12, 4, 2, 4}
+	for i, v := range pairs {
+		binary.BigEndian.PutUint16(body[4+2*i:6+2*i], v)
+	}
+	return flowSet(2, body)
 }
 
 func ipfixPacket(domain, seq uint32, sets ...[]byte) []byte {
