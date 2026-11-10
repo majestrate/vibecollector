@@ -64,7 +64,7 @@ Confirm the host firewall allows the chosen UDP port from the exporters.
 
 ## Read the data
 
-Open the web UI and choose a time range. The views read the local database and share that range and the current filters. Choose a calendar day to hold every view to that day. The day is midnight to midnight in the selected timezone, which starts as UTC.
+Open the web UI and choose a time range. The views read the local database and share that range and the current filters. Choose a calendar day to hold every view to that day. Day boundaries follow the selected timezone, midnight to midnight, and the default is UTC.
 
 - **Flows** lists individual conversations. Filter by address, port, protocol, exporter, country, ASN, or reputation. Pages are 100 flows. Sampled flows are badged `sampled 1:N`. Total counters, L4 payload, and a clamped clock are badged. Direction is shown for ingress and egress. An optional column is `octets * sampling_interval`, labeled estimated, not stored.
 - **Traffic** shows octets and packets over time. Sampled and unsampled exports are separate lines. Neither line is multiplied by the sampling interval.
@@ -72,7 +72,7 @@ Open the web UI and choose a time range. The views read the local database and s
 - **ASN** groups addresses by autonomous system.
 - **Reputation** lists addresses a reputation provider has marked, with the category that provider returned.
 - **Map** is the Equal Earth choropleth of the geo aggregate for the shared range and filters. World geometry ships with the UI. There is no tile server. The map shades countries and draws the busiest paths. It does not draw one mark per flow.
-- **Globe** is a later view. This build does not draw it.
+- **Globe** draws that same geographic aggregate, for the same range and filters. It is a black sphere with tiles off. Drag rotates it and the wheel zooms. It shades countries and draws the busiest paths. It does not draw one mark per flow.
 
 A filter the rollup cannot apply on a range that starts before raw retention shows "this filter is only available inside raw retention". When the API aggregated the numbers from raw flows, the view says so.
 

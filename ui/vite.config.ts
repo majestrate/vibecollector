@@ -68,5 +68,7 @@ export default defineConfig({
   plugins: [react(), daemonProxy()],
   test: {
     environment: "node",
+    // The Playwright spec starts browsers. Vitest must not collect it.
+    exclude: ["**/node_modules/**", "**/dist/**", "e2e/**"],
   },
 });

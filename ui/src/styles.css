@@ -124,6 +124,12 @@ td {
   background: #e7eef5;
 }
 
+.globe {
+  width: 800px;
+  max-width: 100%;
+  background: #000;
+}
+
 .map svg {
   width: 100%;
   height: auto;
