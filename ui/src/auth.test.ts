@@ -1,11 +1,12 @@
 import { afterEach, expect, test, vi } from "vitest";
-import { finishCallback } from "./auth";
-import { setAccessToken } from "./session";
+import { dropSession, finishCallback, refreshAccess } from "./auth";
+import { accessToken, refreshToken, rememberSession } from "./session";
 
 afterEach(() => {
-  setAccessToken(null);
+  dropSession();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
+  vi.useRealTimers();
 });
 
 test("a cleaned-up callback does not consume the return path", async () => {
@@ -46,9 +47,56 @@ test("a cleaned-up callback does not consume the return path", async () => {
   const second = finishCallback(search, () => false, (path) => {
     paths.push(path);
   });
-  release(Response.json({ access_token: "mem-token" }));
+  release(
+    Response.json({
+      access_token: "mem-token",
+      refresh_token: "mem-refresh",
+      expires_in: 3600,
+      token_type: "bearer",
+      scope: "read",
+    }),
+  );
   expect(await first).toBe(false);
   expect(await second).toBe(true);
   expect(paths).toEqual(["/talkers?day=2026-03-08&tz=America/New_York"]);
   expect(mem.has("vibecollector.return")).toBe(false);
+});
+
+test("refresh posts one shared request and replaces both tokens", async () => {
+  rememberSession("old-access", "old-refresh");
+  let calls = 0;
+  let release!: (value: Response) => void;
+  const pending = new Promise<Response>((resolve) => {
+    release = resolve;
+  });
+  vi.stubGlobal("fetch", (_url: string, init?: RequestInit) => {
+    calls += 1;
+    expect(String(init?.body)).toBe(
+      "grant_type=refresh_token&refresh_token=old-refresh&client_id=vibecollector-ui&scope=read",
+    );
+    return pending;
+  });
+  const first = refreshAccess();
+  const second = refreshAccess();
+  release(
+    Response.json({
+      access_token: "new-access",
+      refresh_token: "new-refresh",
+      expires_in: 3600,
+      token_type: "bearer",
+      scope: "read",
+    }),
+  );
+  await Promise.all([first, second]);
+  expect(calls).toBe(1);
+  expect(accessToken()).toBe("new-access");
+  expect(refreshToken()).toBe("new-refresh");
+});
+
+test("a failed refresh clears both tokens", async () => {
+  rememberSession("old-access", "old-refresh");
+  vi.stubGlobal("fetch", async () => new Response("no", { status: 400 }));
+  await expect(refreshAccess()).rejects.toMatchObject({ name: "NeedsLogin", redirectStarted: true });
+  expect(accessToken()).toBeNull();
+  expect(refreshToken()).toBeNull();
 });

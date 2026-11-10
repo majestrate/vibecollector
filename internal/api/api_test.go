@@ -137,6 +137,108 @@ func TestAuthOnLoopback(t *testing.T) {
 	}
 }
 
+func TestRefreshRotation(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "")
+	access, refresh := pkcePair(t, s)
+	if strings.Contains(access, ".") || strings.Contains(refresh, ".") {
+		t.Fatalf("token is not opaque: %s %s", access, refresh)
+	}
+	if access == refresh {
+		t.Fatal("access and refresh are the same value")
+	}
+	rr := call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + access})
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + refresh})
+	if rr.Code != http.StatusUnauthorized {
+		t.Fatal("refresh token accepted as bearer", rr.Code)
+	}
+	rr = refreshCall(t, s, access)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + access})
+	if rr.Code != http.StatusOK {
+		t.Fatal("unknown refresh revoked the family", rr.Code)
+	}
+
+	nextAccess, nextRefresh := refreshPair(t, s, refresh)
+	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + access})
+	if rr.Code != http.StatusOK {
+		t.Fatal("old access died on rotation", rr.Code)
+	}
+	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + nextAccess})
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+
+	rr = refreshCall(t, s, refresh)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
+		t.Fatal("reuse", rr.Code, rr.Body.String())
+	}
+	for _, tok := range []string{access, nextAccess} {
+		rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + tok})
+		if rr.Code != http.StatusUnauthorized {
+			t.Fatal("family still accepted", tok, rr.Code)
+		}
+	}
+	rr = refreshCall(t, s, nextRefresh)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
+		t.Fatal("replacement survived reuse", rr.Code, rr.Body.String())
+	}
+}
+
+func TestRefreshExpiredDoesNotRevokeAccess(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "")
+	access, refresh := pkcePair(t, s)
+	s.mu.Lock()
+	for k, rec := range s.refresh {
+		if rec.successor == "" {
+			rec.exp = time.Now().Add(-time.Second)
+			s.refresh[k] = rec
+		}
+	}
+	s.mu.Unlock()
+	rr := refreshCall(t, s, refresh)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_grant") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + access})
+	if rr.Code != http.StatusOK {
+		t.Fatal("expired refresh revoked the access token", rr.Code)
+	}
+}
+
+func TestClientCredentialsOmitsRefresh(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "s3cret")
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", "vibecollector-ui")
+	form.Set("client_secret", "s3cret")
+	form.Set("scope", "read")
+	rr := call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "refresh_token") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Pragma") != "no-cache" || rr.Header().Get("Cache-Control") != "no-store" {
+		t.Fatal(rr.Header())
+	}
+	wide := url.Values{}
+	wide.Set("grant_type", "refresh_token")
+	wide.Set("refresh_token", "nope")
+	wide.Set("client_id", "vibecollector-ui")
+	wide.Set("scope", "write")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(wide.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_scope") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+}
+
 func TestClientCredentialsEmptySecret(t *testing.T) {
 	s, _ := newAPI(t, "/api/v1", "")
 	body := url.Values{}
@@ -717,6 +819,82 @@ func clientToken(t *testing.T, s *Server, secret string) string {
 		t.Fatal(rr.Code, rr.Body.String())
 	}
 	return tokenOf(t, rr.Body.Bytes())
+}
+
+func pkcePair(t *testing.T, s *Server) (string, string) {
+	t.Helper()
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	verifier := base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge := base64.RawURLEncoding.EncodeToString(sum[:])
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "vibecollector-ui")
+	q.Set("redirect_uri", "http://127.0.0.1:8080/cb")
+	q.Set("code_challenge", challenge)
+	q.Set("code_challenge_method", "S256")
+	q.Set("scope", "read")
+	rr := call(s, http.MethodGet, "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", loc.Query().Get("code"))
+	form.Set("redirect_uri", "http://127.0.0.1:8080/cb")
+	form.Set("client_id", "vibecollector-ui")
+	form.Set("code_verifier", verifier)
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("Pragma") != "no-cache" {
+		t.Fatal(rr.Header().Get("Pragma"))
+	}
+	return tokenOf(t, rr.Body.Bytes()), refreshOf(t, rr.Body.Bytes())
+}
+
+func refreshCall(t *testing.T, s *Server, refresh string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{}
+	form.Set("grant_type", "refresh_token")
+	form.Set("refresh_token", refresh)
+	form.Set("client_id", "vibecollector-ui")
+	form.Set("scope", "read")
+	return call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+}
+
+func refreshPair(t *testing.T, s *Server, refresh string) (string, string) {
+	t.Helper()
+	rr := refreshCall(t, s, refresh)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	return tokenOf(t, rr.Body.Bytes()), refreshOf(t, rr.Body.Bytes())
+}
+
+func refreshOf(t *testing.T, b []byte) string {
+	t.Helper()
+	var m map[string]any
+	if err := json.Unmarshal(b, &m); err != nil {
+		t.Fatal(err)
+	}
+	raw, _ := m["refresh_token"].(string)
+	if raw == "" {
+		t.Fatal(m)
+	}
+	return raw
 }
 
 func tokenOf(t *testing.T, b []byte) string {

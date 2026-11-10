@@ -101,13 +101,15 @@ type HTTP struct {
 // empty, after flag overrides. UIClientID is the public client for
 // authorization code with PKCE; the browser holds no secret. The same
 // UIClientID is the client id for the client-credentials grant. TokenTTL
-// is the access-token lifetime. ClientSecret is required only when that
-// grant is used. An empty ClientSecret does not disable the UI grant and
-// is not a load error.
+// is the access-token lifetime. RefreshTTL is the refresh-token lifetime
+// and must be longer than TokenTTL. ClientSecret is required only when the
+// client-credentials grant is used. An empty ClientSecret does not disable
+// the UI grant and is not a load error.
 type OAuth2 struct {
 	Issuer       string        `toml:"issuer"`
 	UIClientID   string        `toml:"ui_client_id"`
 	TokenTTL     time.Duration `toml:"token_ttl"`
+	RefreshTTL   time.Duration `toml:"refresh_ttl"`
 	ClientSecret string        `toml:"client_secret"`
 }
 
@@ -175,7 +177,8 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // http.token is accepted and ignored. An empty token is not an error, on
 // loopback or any other listen address. [oauth2] is a known table. Empty
 // issuer means the HTTP listen origin after flag overrides, ui_client_id
-// defaults to "vibecollector-ui", and token_ttl defaults to 1h.
+// defaults to "vibecollector-ui", token_ttl defaults to 1h, and
+// refresh_ttl defaults to 24h. refresh_ttl must be longer than token_ttl.
 // client_secret may be empty; it is required only when the client-credentials
 // grant is used, not at load time. http.api_prefix defaults to /api/v1 when
 // omitted or empty.
@@ -281,6 +284,7 @@ var durationKeys = map[string]struct{}{
 	"udp.timestamp_skew_slack":  {},
 	"http.query_cache_ttl":      {},
 	"oauth2.token_ttl":          {},
+	"oauth2.refresh_ttl":        {},
 	"db.busy_timeout":           {},
 	"db.batch_interval":         {},
 	"db.raw_retention":          {},
@@ -546,6 +550,9 @@ func applyDefaults(c *Config) {
 	if c.OAuth2.TokenTTL == 0 {
 		c.OAuth2.TokenTTL = time.Hour
 	}
+	if c.OAuth2.RefreshTTL == 0 {
+		c.OAuth2.RefreshTTL = 24 * time.Hour
+	}
 }
 
 // applyIssuer fills an empty issuer from http.listen. Flags have already
@@ -581,6 +588,7 @@ func validate(c *Config) error {
 		{"udp.timestamp_skew_slack", c.UDP.TimestampSkewSlack, 0},
 		{"http.query_cache_ttl", c.HTTP.QueryCacheTTL, 0},
 		{"oauth2.token_ttl", c.OAuth2.TokenTTL, 0},
+		{"oauth2.refresh_ttl", c.OAuth2.RefreshTTL, 0},
 		{"db.busy_timeout", c.DB.BusyTimeout, 0},
 		{"db.batch_interval", c.DB.BatchInterval, 0},
 		{"db.raw_retention", c.DB.RawRetention, time.Minute},
@@ -606,6 +614,9 @@ func validate(c *Config) error {
 	}
 	if c.UDP.WriterQueue < 1 {
 		return fmt.Errorf("%w: udp.writer_queue", ErrBadConfig)
+	}
+	if c.OAuth2.RefreshTTL <= c.OAuth2.TokenTTL {
+		return fmt.Errorf("%w: oauth2.refresh_ttl", ErrBadConfig)
 	}
 	switch c.Log.Level {
 	case "debug", "info", "warn", "error":

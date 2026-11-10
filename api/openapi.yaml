@@ -43,7 +43,7 @@ tags:
   - name: query
     description: Flows and aggregates for one shared time range.
   - name: oauth
-    description: OAuth 2.0 authorization code with PKCE, and client credentials.
+    description: OAuth 2.0 authorization code with PKCE, refresh tokens, and client credentials.
   - name: discovery
     description: This API document.
 security:
@@ -767,16 +767,22 @@ paths:
       summary: Exchange a grant for an access token
       description: |
         Issues a bearer access token.
-        `grant_type` is `authorization_code` or `client_credentials`.
+        `grant_type` is `authorization_code`, `refresh_token`, or `client_credentials`.
         The body is `application/x-www-form-urlencoded`, not JSON.
 
         `authorization_code` requires `code`, `redirect_uri`, `client_id`, and
         the PKCE `code_verifier` for the challenge sent to `/oauth/authorize`.
-        `client_credentials` requires `client_id` and `client_secret`.
+        `refresh_token` requires `refresh_token` and `client_id`. It returns a new
+        access token and a new refresh token. The previous refresh token is spent.
+        Presenting a spent refresh token revokes that session.
+        `client_credentials` requires `client_id` and `client_secret` and does not
+        return a refresh token.
         Optional `scope` is `read`.
 
         The response is `access_token`, `token_type` `bearer`, `expires_in`, and `scope` `read`.
-        Send the token only as `Authorization: Bearer`.
+        Authorization-code and refresh responses also include `refresh_token`.
+        Both values are opaque. The access token is sent only as `Authorization: Bearer`.
+        The refresh token is sent only to this route.
         The query string is not a token channel.
         This route does not require an existing access token.
       security: []
@@ -802,6 +808,13 @@ paths:
                   client_id: example-client
                   client_secret: example-secret
                   scope: read
+              refresh_token:
+                summary: Refresh an access token
+                value:
+                  grant_type: refresh_token
+                  refresh_token: example-refresh-token
+                  client_id: example-client
+                  scope: read
       responses:
         "200":
           description: Bearer access token.
@@ -814,10 +827,11 @@ paths:
                 token_type: bearer
                 expires_in: 3600
                 scope: read
+                refresh_token: example-refresh-token
         "400":
           description: |
-            The grant is malformed, the code or PKCE verifier was rejected,
-            or `grant_type` is not `authorization_code` or `client_credentials`.
+            The grant is malformed, the code, PKCE verifier, or refresh token was rejected,
+            or `grant_type` is not `authorization_code`, `refresh_token`, or `client_credentials`.
           content:
             application/json:
               schema:
@@ -847,7 +861,8 @@ components:
     oauth2:
       type: oauth2
       description: |
-        OAuth 2.0 access tokens. The only scope is `read`.
+        OAuth 2.0 opaque access tokens. The only scope is `read`.
+        The UI client refreshes with `grant_type=refresh_token` before `expires_in`.
         Tokens travel only in the `Authorization: Bearer` header.
         The query string is not a token channel.
         A missing or rejected token on a REST route is 401 on every bind.
@@ -856,6 +871,7 @@ components:
         authorizationCode:
           authorizationUrl: /oauth/authorize
           tokenUrl: /oauth/token
+          refreshUrl: /oauth/token
           scopes:
             read: read collected flows and aggregates
         clientCredentials:
@@ -2022,7 +2038,7 @@ components:
       properties:
         grant_type:
           type: string
-          enum: [authorization_code, client_credentials]
+          enum: [authorization_code, refresh_token, client_credentials]
           description: Which grant is being redeemed.
         code:
           type: string
@@ -2035,7 +2051,7 @@ components:
             Required when `grant_type` is `authorization_code`.
         client_id:
           type: string
-          description: Client identifier. Required for both grants.
+          description: Client identifier. Required for every grant.
         client_secret:
           type: string
           description: Client secret. Required when `grant_type` is `client_credentials`.
@@ -2044,6 +2060,12 @@ components:
           description: |
             PKCE verifier for the `code_challenge` sent to `/oauth/authorize`.
             Required when `grant_type` is `authorization_code`.
+        refresh_token:
+          type: string
+          description: |
+            Opaque refresh token from a previous token response.
+            Required when `grant_type` is `refresh_token`.
+            Send it only to this route. It is not an access token.
         scope:
           type: string
           description: Space-delimited scopes. The only scope is `read`.
@@ -2055,8 +2077,13 @@ components:
         access_token:
           type: string
           description: |
-            Bearer token. Send it only as `Authorization: Bearer`.
+            Opaque bearer token. Send it only as `Authorization: Bearer`.
             The query string is not a token channel.
+        refresh_token:
+          type: string
+          description: |
+            Opaque refresh token. Present on authorization-code and refresh responses.
+            Absent on client-credentials responses. Send it only to `POST /oauth/token`.
         token_type:
           type: string
           enum: [bearer]

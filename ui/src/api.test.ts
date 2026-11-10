@@ -4,7 +4,8 @@ import { LoginFailed, parseJSON, prefixFromSpec } from "./api";
 import { s256Challenge } from "./auth";
 import type { Filters } from "./filters";
 import { fetchGeo, FilterOutsideRaw, QueryTimeout } from "./geo/fetch";
-import { setAccessToken, setAPIPrefix } from "./session";
+import { dropSession } from "./auth";
+import { accessToken, refreshToken, rememberSession, setAccessToken, setAPIPrefix } from "./session";
 
 const filters: Filters = {
   start: "2026-11-09T00:00:00Z",
@@ -25,7 +26,7 @@ const filters: Filters = {
 };
 
 afterEach(() => {
-  setAccessToken(null);
+  dropSession();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
 });
@@ -105,6 +106,50 @@ test("filter_outside_raw and query_timeout and 401 reject", async () => {
   await expect(fetchGeo(filters)).rejects.toBeInstanceOf(QueryTimeout);
   fetchMock.mockResolvedValueOnce(Response.json({ error: "unauthorized" }, { status: 401 }));
   await expect(fetchGeo(filters)).rejects.toMatchObject({ name: "Unauthorized" });
+});
+
+test("401 refreshes once and retries the GET", async () => {
+  rememberSession("old-access", "old-refresh");
+  setAPIPrefix("/api/v1");
+  const urls: string[] = [];
+  vi.stubGlobal("fetch", async (url: string, init?: RequestInit) => {
+    urls.push(String(url));
+    if (String(url) === "/oauth/token") {
+      const body = String(init?.body);
+      expect(body).toContain("grant_type=refresh_token");
+      expect(body).toContain("refresh_token=old-refresh");
+      expect(body).not.toContain("code_verifier");
+      return Response.json({
+        access_token: "new-access",
+        refresh_token: "new-refresh",
+        expires_in: 3600,
+        token_type: "bearer",
+        scope: "read",
+      });
+    }
+    const geoHits = urls.filter((item) => item.includes("/geo")).length;
+    if (geoHits === 1) return Response.json({ error: "unauthorized" }, { status: 401 });
+    return Response.json({
+      source: "rollup",
+      start: filters.start,
+      end: filters.end,
+      tz: "UTC",
+      boundary_adjusted: false,
+      bytes_are: "endpoint_touch",
+      approximate: false,
+      countries: [],
+      paths: [],
+      path_cap: 100,
+      paths_omitted: 0,
+      other_octets: "0",
+    });
+  });
+  const got = await fetchGeo(filters);
+  expect(got.source).toBe("rollup");
+  expect(accessToken()).toBe("new-access");
+  expect(refreshToken()).toBe("new-refresh");
+  expect(urls.filter((item) => item.includes("/geo"))).toHaveLength(2);
+  expect(urls.filter((item) => item === "/oauth/token")).toHaveLength(1);
 });
 
 test("401 surfaces a login redirect that did not start", async () => {

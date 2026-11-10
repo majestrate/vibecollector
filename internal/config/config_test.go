@@ -457,7 +457,7 @@ func TestAPIPrefixAndOAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.APIPrefix != "/api/v1" || cfg.OAuth2.TokenTTL != time.Hour || cfg.OAuth2.ClientSecret != "s3cret" {
+	if cfg.HTTP.APIPrefix != "/api/v1" || cfg.OAuth2.TokenTTL != time.Hour || cfg.OAuth2.RefreshTTL != 24*time.Hour || cfg.OAuth2.ClientSecret != "s3cret" {
 		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
 	}
 	path = writeConfig(t, "[http]\napi_prefix = \"/collector/v1\"\n[oauth2]\nissuer = \"http://collector.example\"\ntoken_ttl = \"15m\"\nui_client_id = \"ui\"\n", 0o600)
@@ -465,7 +465,7 @@ func TestAPIPrefixAndOAuth(t *testing.T) {
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.APIPrefix != "/collector/v1" || cfg.OAuth2.Issuer != "http://collector.example" || cfg.OAuth2.TokenTTL != 15*time.Minute || cfg.OAuth2.UIClientID != "ui" {
+	if cfg.HTTP.APIPrefix != "/collector/v1" || cfg.OAuth2.Issuer != "http://collector.example" || cfg.OAuth2.TokenTTL != 15*time.Minute || cfg.OAuth2.RefreshTTL != 24*time.Hour || cfg.OAuth2.UIClientID != "ui" {
 		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
 	}
 	bad := []string{
@@ -477,6 +477,10 @@ func TestAPIPrefixAndOAuth(t *testing.T) {
 		"[http]\napi_prefix = \"/api/v1#x\"\n",
 		"[oauth2]\ntoken_ttl = \"-1s\"\n",
 		"[oauth2]\ntoken_ttl = 60\n",
+		"[oauth2]\nrefresh_ttl = \"-1s\"\n",
+		"[oauth2]\nrefresh_ttl = 60\n",
+		"[oauth2]\nrefresh_ttl = \"30m\"\n",
+		"[oauth2]\ntoken_ttl = \"48h\"\nrefresh_ttl = \"24h\"\n",
 	}
 	for _, body := range bad {
 		path = writeConfig(t, body, 0o600)

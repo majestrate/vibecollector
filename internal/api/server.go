@@ -6,7 +6,6 @@ import (
 	"crypto/sha256"
 	"crypto/subtle"
 	"encoding/base64"
-	"encoding/hex"
 	"encoding/json"
 	"errors"
 	"fmt"
@@ -39,6 +38,8 @@ var errBadRange = errors.New("bad_range")
 // Server is the HTTP API and the OAuth2 authorization server for this UI.
 // ListenAndServe binds cfg.Listen. Every route under the API prefix,
 // including health, requires an Authorization bearer with scope read.
+// The bearer is an opaque access token. The UI grant also returns an opaque
+// refresh token that rotates on use. Both live in process memory.
 // GET /openapi.json, GET /oauth/authorize, and POST /oauth/token stay at
 // the site root and are not token-gated. Static files from ui are not gated.
 type Server struct {
@@ -52,10 +53,11 @@ type Server struct {
 	spec     []byte
 	mux      *http.ServeMux
 
-	mu     sync.Mutex
-	codes  map[string]authCode
-	tokens map[string]time.Time
-	bound  string
+	mu      sync.Mutex
+	codes   map[string]authCode
+	access  map[string]accessRec
+	refresh map[string]refreshRec
+	bound   string
 }
 
 type authCode struct {
@@ -110,7 +112,8 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, counters *o
 		spec:     spec,
 		mux:      http.NewServeMux(),
 		codes:    map[string]authCode{},
-		tokens:   map[string]time.Time{},
+		access:   map[string]accessRec{},
+		refresh:  map[string]refreshRec{},
 	}
 	s.routes()
 	return s, nil
@@ -342,23 +345,6 @@ func bearerToken(r *http.Request) (string, bool) {
 	return tok, true
 }
 
-func (s *Server) validToken(tok string) bool {
-	sum := sha256.Sum256([]byte(tok))
-	key := hex.EncodeToString(sum[:])
-	s.mu.Lock()
-	exp, ok := s.tokens[key]
-	s.mu.Unlock()
-	stored := sum
-	if !ok {
-		stored = sha256.Sum256(nil)
-	}
-	match := subtle.ConstantTimeCompare(sum[:], stored[:]) == 1
-	if !ok || !match || !time.Now().Before(exp) {
-		return false
-	}
-	return true
-}
-
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
 	if q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" {
@@ -400,6 +386,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	u.RawQuery = qq.Encode()
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
@@ -411,6 +398,8 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	switch r.PostForm.Get("grant_type") {
 	case "authorization_code":
 		s.tokenCode(w, r)
+	case "refresh_token":
+		s.tokenRefresh(w, r)
 	case "client_credentials":
 		s.tokenClient(w, r)
 	default:
@@ -445,7 +434,35 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_grant")
 		return
 	}
-	s.writeToken(w)
+	res := s.issuePair(id)
+	if res.status != http.StatusOK {
+		oauthErr(w, res.status, res.code)
+		return
+	}
+	s.writeTokens(w, res.access, res.secs, res.refresh)
+}
+
+func (s *Server) tokenRefresh(w http.ResponseWriter, r *http.Request) {
+	if scope := r.PostForm.Get("scope"); scope != "" && scope != "read" {
+		oauthErr(w, http.StatusBadRequest, "invalid_scope")
+		return
+	}
+	id := r.PostForm.Get("client_id")
+	raw := r.PostForm.Get("refresh_token")
+	if id == "" || raw == "" {
+		oauthErr(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	if id != s.oauth.UIClientID {
+		oauthErr(w, http.StatusUnauthorized, "invalid_client")
+		return
+	}
+	res := s.redeemRefresh(raw, id)
+	if res.status != http.StatusOK {
+		oauthErr(w, res.status, res.code)
+		return
+	}
+	s.writeTokens(w, res.access, res.secs, res.refresh)
 }
 
 func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
@@ -459,43 +476,12 @@ func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
-	s.writeToken(w)
-}
-
-func (s *Server) writeToken(w http.ResponseWriter) {
-	buf := make([]byte, 32)
-	if _, err := rand.Read(buf); err != nil {
-		oauthErr(w, http.StatusInternalServerError, "server_error")
+	res := s.issueAccess()
+	if res.status != http.StatusOK {
+		oauthErr(w, res.status, res.code)
 		return
 	}
-	tok := base64.RawURLEncoding.EncodeToString(buf)
-	ttl := s.oauth.TokenTTL
-	if ttl <= 0 {
-		ttl = time.Hour
-	}
-	sum := sha256.Sum256([]byte(tok))
-	key := hex.EncodeToString(sum[:])
-	exp := time.Now().Add(ttl)
-	s.mu.Lock()
-	now := time.Now()
-	for k, e := range s.tokens {
-		if !now.Before(e) {
-			delete(s.tokens, k)
-		}
-	}
-	s.tokens[key] = exp
-	s.mu.Unlock()
-	secs := int(ttl.Seconds())
-	if secs < 1 {
-		secs = 1
-	}
-	w.Header().Set("Cache-Control", "no-store")
-	writeJSON(w, http.StatusOK, map[string]any{
-		"access_token": tok,
-		"token_type":   "bearer",
-		"expires_in":   secs,
-		"scope":        "read",
-	})
+	s.writeTokens(w, res.access, res.secs, "")
 }
 
 func (s *Server) issueCode(c authCode) string {
@@ -571,6 +557,7 @@ func sameOrigin(r *http.Request, redirect, issuer string) bool {
 
 func oauthErr(w http.ResponseWriter, status int, code string) {
 	w.Header().Set("Cache-Control", "no-store")
+	w.Header().Set("Pragma", "no-cache")
 	writeJSON(w, status, map[string]string{"error": code})
 }
 

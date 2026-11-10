@@ -1,6 +1,6 @@
-import { startLogin } from "./auth";
+import { dropSession, NeedsLogin, refreshAccess, startLogin } from "./auth";
 import type { Filters } from "./filters";
-import { accessToken, apiPrefix, setAccessToken } from "./session";
+import { accessToken, apiPrefix, refreshToken } from "./session";
 
 const DATA_ROUTES = ["health", "stats", "exporters", "flows", "timeseries", "talkers", "asns", "reputation", "geo"] as const;
 
@@ -133,9 +133,18 @@ export function filterSearch(filters: Filters): URLSearchParams {
  * The result is the status and the parsed body.
  * It rejects with Unauthorized on 401 after the login redirect starts.
  * It rejects with LoginFailed when that redirect cannot start.
+ * A 401 with a refresh token in memory refreshes once and retries the GET once.
  * The bearer comes from memory. It does not read localStorage or the query string.
  */
 export async function apiSend(route: string, opts?: { query?: URLSearchParams; fresh?: boolean }): Promise<{ status: number; body: unknown }> {
+  return send(route, opts, true);
+}
+
+async function send(
+  route: string,
+  opts: { query?: URLSearchParams; fresh?: boolean } | undefined,
+  allowRefresh: boolean,
+): Promise<{ status: number; body: unknown }> {
   const query = opts?.query;
   const qs = query && [...query.keys()].length > 0 ? `?${query.toString()}` : "";
   const url = apiPrefix() + route + qs;
@@ -146,7 +155,16 @@ export async function apiSend(route: string, opts?: { query?: URLSearchParams; f
   const res = await fetch(url, { headers, redirect: "error" });
   if (res.status === 401) {
     await res.body?.cancel();
-    setAccessToken(null);
+    if (allowRefresh && refreshToken()) {
+      try {
+        await refreshAccess();
+      } catch (err) {
+        if (err instanceof NeedsLogin && !err.redirectStarted) throw new LoginFailed(err.message);
+        throw new Unauthorized();
+      }
+      return send(route, opts, false);
+    }
+    dropSession();
     try {
       await startLogin();
     } catch (err) {

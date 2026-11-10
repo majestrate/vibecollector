@@ -1,4 +1,4 @@
-import { setAccessToken } from "./session";
+import { clearSession, refreshToken, rememberSession } from "./session";
 
 const CLIENT_ID = "vibecollector-ui";
 const REDIRECT_PATH = "/callback";
@@ -8,6 +8,23 @@ const RETURN_KEY = "vibecollector.return";
 
 let loginFlight: Promise<void> | null = null;
 let exchangeFlight: Promise<void> | null = null;
+let refreshFlight: Promise<void> | null = null;
+let refreshTimer: ReturnType<typeof setTimeout> | null = null;
+
+/**
+ * NeedsLogin means the refresh token could not be redeemed.
+ * redirectStarted is true when the full sign-in redirect has begun.
+ * message is why the redirect did not start when redirectStarted is false.
+ */
+export class NeedsLogin extends Error {
+  readonly redirectStarted: boolean;
+
+  constructor(message: string, redirectStarted: boolean) {
+    super(message);
+    this.name = "NeedsLogin";
+    this.redirectStarted = redirectStarted;
+  }
+}
 
 /**
  * s256Challenge returns the PKCE S256 challenge for verifier.
@@ -182,10 +199,104 @@ async function runExchange(search: string): Promise<void> {
     throw new Error("Sign-in failed.");
   }
   const tok: unknown = await res.json();
+  storeTokenResponse(tok);
+}
+
+/**
+ * refreshAccess trades the in-memory refresh token for a new pair.
+ * Concurrent callers share one POST. The body is grant_type refresh_token.
+ * It does not redo PKCE. A failure clears both tokens.
+ * It throws NeedsLogin when the session is gone. redirectStarted on that
+ * error means startLogin already ran.
+ */
+export function refreshAccess(): Promise<void> {
+  if (!refreshFlight) {
+    refreshFlight = runRefresh().finally(() => {
+      refreshFlight = null;
+    });
+  }
+  return refreshFlight;
+}
+
+/**
+ * dropSession forgets both tokens and cancels the refresh timer.
+ * The next page load signs in from scratch.
+ */
+export function dropSession(): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  refreshTimer = null;
+  clearSession();
+}
+
+function storeTokenResponse(tok: unknown): void {
   if (!isRecord(tok) || typeof tok.access_token !== "string" || tok.access_token === "") {
     throw new Error("Sign-in failed.");
   }
-  setAccessToken(tok.access_token);
+  if (typeof tok.refresh_token !== "string" || tok.refresh_token === "") {
+    throw new Error("Sign-in failed.");
+  }
+  if (typeof tok.expires_in !== "number" || tok.expires_in < 1) {
+    throw new Error("Sign-in failed.");
+  }
+  rememberSession(tok.access_token, tok.refresh_token);
+  armRefresh(tok.expires_in);
+}
+
+function armRefresh(expiresIn: number): void {
+  if (refreshTimer) clearTimeout(refreshTimer);
+  const skew = 60;
+  const seconds = expiresIn > skew ? expiresIn - skew : Math.max(1, Math.floor(expiresIn / 2));
+  refreshTimer = setTimeout(() => {
+    refreshTimer = null;
+    void refreshAccess().catch(() => {});
+  }, seconds * 1000);
+}
+
+async function runRefresh(): Promise<void> {
+  const current = refreshToken();
+  if (!current) {
+    throw new NeedsLogin("Sign-in failed.", false);
+  }
+  const form = new URLSearchParams({
+    grant_type: "refresh_token",
+    refresh_token: current,
+    client_id: CLIENT_ID,
+    scope: "read",
+  });
+  let res: Response;
+  try {
+    res = await fetch("/oauth/token", {
+      method: "POST",
+      headers: {
+        Accept: "application/json",
+        "Content-Type": "application/x-www-form-urlencoded",
+      },
+      body: form.toString(),
+    });
+  } catch {
+    dropSession();
+    throw await loginAfterRefresh();
+  }
+  if (!res.ok) {
+    dropSession();
+    throw await loginAfterRefresh();
+  }
+  try {
+    storeTokenResponse(await res.json());
+  } catch {
+    dropSession();
+    throw await loginAfterRefresh();
+  }
+}
+
+async function loginAfterRefresh(): Promise<NeedsLogin> {
+  try {
+    await startLogin();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Sign-in failed.";
+    return new NeedsLogin(message, false);
+  }
+  return new NeedsLogin("unauthorized", true);
 }
 
 function randomToken(): string {
