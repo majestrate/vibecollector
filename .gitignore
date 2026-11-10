@@ -1,6 +1,7 @@
 ui/node_modules
 ui/dist
 ui/embed_dist.go
+ui/test-results
 *.db
 *.db-wal
 *.db-shm

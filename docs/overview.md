@@ -48,7 +48,7 @@ The views are:
 - a flat world map
 - a spherical globe
 
-The map and globe routes are in the shell. This build does not draw them and does not contact a tile service. Flows, traffic, top talkers, ASN, and reputation are the views that read the database.
+The map and the globe draw the same geographic aggregate. World geometry ships with the UI. Neither view contacts a tile service. Flows, traffic, top talkers, ASN, and reputation read the database as well.
 
 The daemon serves the API behind these views. A production install also serves the built UI from the daemon. During development the UI runs through pnpm and talks to that API.
 
