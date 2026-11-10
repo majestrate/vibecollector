@@ -33,12 +33,12 @@ Configuration covers:
 - the UDP listen address and port (default port UDP 2055)
 - the path to the SQLite database
 - the HTTP listen address for the UI and API
-- which enrichment providers are enabled
+- enrichment cache lifetimes (`geoip_ttl` defaults to 24h, `asn_ttl` defaults to 24h, `reputation_ttl` defaults to 1h)
 - how long raw flows and UI aggregates are kept
 
 `udp.listen` defaults to `0.0.0.0:2055`. Ports 4739, 9995, and 9996 are also common, and 9996 is not verified as one vendor's default. The datagram queue defaults to 8192 and the flow queue defaults to 200000. UDP has no exporter allow-list. Any host that can reach the listen address can insert flows. The firewall is the control.
 
-Until a provider client is implemented and enabled, GeoIP, ASN, and reputation stay empty. The collector still stores flows.
+Until a provider client replaces the stub in code, GeoIP, ASN, and reputation stay empty. The collector still stores flows.
 
 Bind the HTTP service to localhost unless you intend other machines to open the UI. Flow data is sensitive. Put a reverse proxy with access control in front of the HTTP port if you expose it beyond the collector host.
 
@@ -74,11 +74,11 @@ A flow with an empty annotation means the provider is still a stub, the provider
 
 GeoIP, ASN, and reputation are separate providers on one interface. The build includes a stub for each. A stub records "not configured" and does not contact an external service.
 
-To turn an annotation on, implement that provider's client and enable it in the collector configuration. The collector then looks up global addresses through the client, caches the answer in memory, and stores the annotation with later flows. Each provider has its own cache lifetime, because a geographic assignment changes rarely and a reputation score changes often.
+A stub is replaced by a client in code; `[enrich.geoip]`, `[enrich.asn]`, and `[enrich.reputation]` are reserved and have no effect. The collector then looks up global addresses through the client, caches the answer in memory, and stores the annotation with later flows. Each provider has its own cache lifetime, because a geographic assignment changes rarely and a reputation score changes often. `geoip_ttl` defaults to 24h, `asn_ttl` defaults to 24h, and `reputation_ttl` defaults to 1h.
 
 Lookups run beside the UDP reader. A slow or failed provider does not stop collection. The stored flow keeps a per-provider outcome so the UI can show "not configured", "no data", or "error" instead of a blank that looks like a successful empty answer.
 
-Enabling a real provider sends looked-up IP addresses to that provider. Enable one only if that destination is acceptable for this traffic.
+A real provider sends looked-up IP addresses to that provider. Use one only if that destination is acceptable for this traffic.
 
 ## What you will see during problems
 
