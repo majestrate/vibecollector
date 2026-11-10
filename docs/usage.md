@@ -24,7 +24,7 @@ An unknown key is a startup error. A typo does not silently take effect.
 
 `http.listen` defaults to `127.0.0.1:8080`. `http.token` is required when the HTTP listen address is not loopback. Without it the process exits 2.
 
-`[db] path` defaults to `vibecollector.db`. `[db] busy_timeout` defaults to `5s`.
+`[db] path` defaults to `vibecollector.db`. `[db] busy_timeout` defaults to `5s`. `[db] batch_size` defaults to 2000. `[db] batch_interval` defaults to `500ms`.
 
 If the config file mode is looser than `0600`, the process logs a warning and still starts.
 
