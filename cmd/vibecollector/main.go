@@ -18,6 +18,8 @@ import (
 	_ "vibecollector/internal/decode/ipfix"
 	_ "vibecollector/internal/decode/v5"
 	_ "vibecollector/internal/decode/v9"
+	"vibecollector/internal/enrich"
+	"vibecollector/internal/enrich/stub"
 	"vibecollector/internal/flow"
 	"vibecollector/internal/ingest"
 	"vibecollector/internal/obs"
@@ -80,11 +82,17 @@ func run(cfg *config.Config) int {
 		return 1
 	}
 
-	// main owns both queues. Workers send flows. They do not call Submit.
-	// Nothing drains flows until the enrich pipeline exists.
+	// main owns the flow queue. Decode workers send on it and do not call Submit.
+	// Pipeline.Run is the only Submit caller. There is no writer yet, so the
+	// sink discards enriched flows.
 	datagrams := make(chan ingest.Datagram, cfg.UDP.DatagramQueue)
 	flows := make(chan flow.Flow, cfg.UDP.FlowQueue)
 	sink := discardSink{}
+	pipe, err := newPipeline(cfg, counters)
+	if err != nil {
+		slog.Error("enrich", "err", err)
+		return 1
+	}
 
 	ctx, cancel := context.WithCancel(context.Background())
 	defer cancel()
@@ -110,6 +118,12 @@ func run(cfg *config.Config) int {
 			decodeWorker(session, datagrams, flows, sink, counters, order, nil)
 		}()
 	}
+	wg.Add(1)
+	go func() {
+		defer wg.Done()
+		// Cancellation returns nil. ErrQueueFull is counted inside Run, not here.
+		_ = pipe.Run(ctx, flows, sink)
+	}()
 
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
@@ -130,6 +144,27 @@ func run(cfg *config.Config) int {
 		}
 		return 1
 	}
+}
+
+// newPipeline builds the three stubs and their caches. Each log line is the
+// startup statement that this process does not send addresses anywhere.
+func newPipeline(cfg *config.Config, counters *obs.Counters) (*enrich.Pipeline, error) {
+	caches := map[enrich.ProviderName]*enrich.Cache{}
+	var providers []enrich.Provider
+	for _, name := range []enrich.ProviderName{enrich.ProviderGeoIP, enrich.ProviderASN, enrich.ProviderReputation} {
+		p, err := stub.New(name)
+		if err != nil {
+			return nil, err
+		}
+		providers = append(providers, p)
+		c, err := enrich.NewCache(cfg.Enrich.CacheEntries)
+		if err != nil {
+			return nil, err
+		}
+		caches[name] = c
+		slog.Info(string(name) + " provider: not configured, no outbound lookups")
+	}
+	return enrich.NewPipeline(providers, caches, cfg.Enrich, counters)
 }
 
 func newSession(cfg *config.Config, counters *obs.Counters) (*decode.Session, error) {
