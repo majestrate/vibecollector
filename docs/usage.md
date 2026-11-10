@@ -22,7 +22,17 @@ The config file is `./vibecollector.toml` when that file is present. Otherwise t
 
 An unknown key is a startup error. A typo does not silently take effect.
 
-`http.listen` defaults to `127.0.0.1:8080`. `http.token` is required when the HTTP listen address is not loopback. Without it the process exits 2.
+`http.listen` defaults to `127.0.0.1:8080`. `http.token` is accepted and ignored. Every route under `http.api_prefix` requires an OAuth2 bearer token with scope `read`. A missing or rejected token is 401, including on loopback. The token is not read from the query string. `http.api_prefix` defaults to `/api/v1` when it is omitted or empty. It must start with `/`, must not end with `/`, and must not contain `?`, `#`, `..`, or an empty segment.
+
+`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. The authorization redirect may use that issuer origin, or the request host. The scheme is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The UI uses authorization code with PKCE and sends no client secret.
+
+`GET /openapi.json` serves the OpenAPI document and does not require a token. `GET /oauth/authorize` and `POST /oauth/token` are the daemon's token endpoints and do not require an access token.
+
+An unsupported filter on a rollup route whose range starts before raw retention is 400 `{"error":"filter_outside_raw","raw_available_from":...}`. That route does not drop the filter and return the unfiltered rollup.
+
+```
+curl -H "Authorization: Bearer $TOKEN" "http://127.0.0.1:8080/api/v1/flows?day=2026-11-09&tz=America/New_York"
+```
 
 `[db] path` defaults to `vibecollector.db`. `[db] busy_timeout` defaults to `5s`. `[db] batch_size` defaults to 2000. `[db] batch_interval` defaults to `500ms`. `[db] raw_retention` defaults to `6h`. `[db] rollup_retention` defaults to `720h` (30 days). Flows whose start is older than raw retention, and rollup buckets older than rollup retention, are deleted in the background. Those deletes do not block UDP. When the database volume has under 5 GiB free, new raw flows are not stored and each one counts as `dropped_disk`. Rollups from flows already in memory still update, and deletes keep running.
 

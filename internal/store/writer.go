@@ -34,10 +34,11 @@ var ErrNilDep = errors.New("nil dependency")
 // not start a goroutine. errors.Is reports this sentinel.
 var ErrBadConfig = errors.New("invalid configuration")
 
-// Writer inserts flows, exporter deltas, and the additive rollups traffic_1m,
-// asn_1m, and geo_country_5m. It implements flow.Sink. Submit and SubmitDelta
-// are safe for concurrent callers. Run is the single inserter. Sweeper deletes
-// expired rows in other transactions.
+
+// Writer is the only goroutine that writes flows, exporter deltas, and the
+// rollups. It implements flow.Sink. Submit and SubmitDelta are safe for
+// concurrent callers. Run is the single writer. Sweeper deletes expired rows
+// in other transactions.
 type Writer struct {
 	db       *DB
 	counters *obs.Counters
@@ -133,16 +134,18 @@ func (w *Writer) SubmitDelta(d flow.ExporterDelta) {
 // those rollups when its counter semantics are delta and its octet semantics
 // are ip. Total and l4_payload flows are stored and omitted from the rollups.
 // The primary octet value is Flow.Octets; OutOctets is not added again.
-// When Sweeper has seen under 5 GiB free on the database volume, the batch
-// still commits exporter deltas and rollups, skips the flows insert, and
-// adds one dropped_disk per skipped flow. UDP does not wait on that decision.
-// A SQLite error rolls that batch back, increments sqlite_write_failures,
-// logs the error class, drops the batch, and Run continues with the next one.
-// It does not retry the batch. sqlite_rows_written counts inserted flow rows
-// in a committed batch, not flows skipped while disk shed is on. The returned
-// error is non-nil only when ctx is done and
-// the last flush fails. A cancelled ctx with a successful last flush, or with
-// nothing left to write, returns nil.
+// asn_1m stays additive until a minute reaches 50,000 distinct ASNs. That
+// minute is then replaced in the same transaction: 50,000 ASNs and one row
+// with ASN -1. When Sweeper has seen under 5 GiB free on the database volume,
+// the batch still commits exporter deltas and rollups, skips the flows insert,
+// and adds one dropped_disk per skipped flow. UDP does not wait on that
+// decision. A SQLite error rolls the batch back, increments
+// sqlite_write_failures, logs the error class, drops the batch, and Run
+// continues with the next one. It does not retry the batch.
+// sqlite_rows_written counts inserted flow rows in a committed batch, not
+// flows skipped while disk shed is on. The returned error is non-nil only
+// when ctx is done and the last flush fails. A cancelled ctx with a successful
+// last flush, or with nothing left to write, returns nil.
 func (w *Writer) Run(ctx context.Context) error {
 	n := w.batch
 	if n > writerQueue {

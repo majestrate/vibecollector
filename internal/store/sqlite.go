@@ -30,6 +30,9 @@ type DB struct {
 	// shedRaw is set by Sweeper when the database volume is under 5 GiB free.
 	// Writer skips raw flow inserts while it is set. Rollups still update.
 	shedRaw atomic.Bool
+	// rawRetention is the horizon Query uses for raw_available_from.
+	// It is not exported. Callers pass it to Open through config.DB.
+	rawRetention time.Duration
 }
 
 // Open opens or creates the SQLite database at cfg.Path, runs migrations, and
@@ -61,7 +64,7 @@ func Open(cfg config.DB) (*DB, error) {
 		pool.Close()
 		return nil, err
 	}
-	return &DB{pool: pool}, nil
+	return &DB{pool: pool, rawRetention: cfg.RawRetention}, nil
 }
 
 // Checkpoint runs wal_checkpoint(TRUNCATE) on the open pool. main calls it
