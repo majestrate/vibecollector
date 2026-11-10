@@ -24,7 +24,7 @@ An unknown key is a startup error. A typo does not silently take effect.
 
 `http.listen` defaults to `127.0.0.1:8080`. `http.token` is accepted and ignored. Every route under `http.api_prefix` requires an OAuth2 bearer token with scope `read`. A missing or rejected token is 401, including on loopback. The token is not read from the query string. `http.api_prefix` defaults to `/api/v1` when it is omitted or empty. It must start with `/`, must not end with `/`, and must not contain `?`, `#`, `..`, or an empty segment.
 
-`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. The authorization redirect may use that issuer origin, or the request host. The scheme is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The UI uses authorization code with PKCE and sends no client secret.
+`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. The authorization redirect may use that issuer origin, or the request host. The scheme is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The shell uses authorization code with PKCE and sends no client secret. It keeps the access token in memory and sends `Authorization: Bearer` on every request under the configured prefix. The token is not stored in localStorage and is not placed in the query string.
 
 `GET /openapi.json` serves the OpenAPI document and does not require a token. `GET /oauth/authorize` and `POST /oauth/token` are the daemon's token endpoints and do not require an access token.
 
@@ -66,15 +66,14 @@ Confirm the host firewall allows the chosen UDP port from the exporters.
 
 Open the web UI and choose a time range. The views read the local database and share that range and the current filters. Choose a calendar day to hold every view to that day. The day is midnight to midnight in the selected timezone, which starts as UTC.
 
-- **Flows** lists individual conversations. Filter by address, port, protocol, exporter, country, ASN, or reputation.
-- **Traffic** shows bytes and packets over time for the current filters.
-- **Top talkers** ranks sources and destinations for the selected range.
-- **World map** is a flat map. Countries are shaded by traffic volume, and arcs show the busiest paths between places in the selected range.
-- **Globe** draws those same country totals and paths on a sphere. Rotate and zoom it. Changing the day, the range, or a filter updates the map and the globe together.
+- **Flows** lists individual conversations. Filter by address, port, protocol, exporter, country, ASN, or reputation. Pages are 100 flows. Sampled flows are badged `sampled 1:N`. Total counters, L4 payload, and a clamped clock are badged. Direction is shown for ingress and egress. An optional column is `octets * sampling_interval`, labeled estimated, not stored.
+- **Traffic** shows octets and packets over time. Sampled and unsampled exports are separate lines. Neither line is multiplied by the sampling interval.
+- **Top talkers** ranks sources and destinations for the selected range. Ports are not ranked.
 - **ASN** groups addresses by autonomous system.
 - **Reputation** lists addresses a reputation provider has marked, with the category that provider returned.
+- **Map** and **Globe** are routes in the shell. This build does not draw them.
 
-The map and the globe draw rolled-up places, not one mark per flow. They use the GeoIP annotation stored with the flow. With the shipped GeoIP stub, both still show the world and leave the traffic layer empty. Private and otherwise non-global addresses stay off both views.
+A filter the rollup cannot apply on a range that starts before raw retention shows "this filter is only available inside raw retention". When the API aggregated the numbers from raw flows, the view says so.
 
 Private and otherwise non-global addresses appear in the flow table and carry a local classification. They do not receive GeoIP, ASN, or reputation annotations.
 
@@ -92,7 +91,7 @@ A real provider sends looked-up IP addresses to that provider. Use one only if t
 
 ## What you will see during problems
 
-The UI includes exporter health: last packet time, decode errors, and flows dropped because a template was missing. Use those counters before changing export configuration on the device.
+The UI includes an exporter strip on every page: last packet time, malformed packets, missing templates, and sequence gap flows, packets, and records. It polls every 5 seconds. Use those counters before changing export configuration on the device.
 
 Collection trouble is usually one of these:
 

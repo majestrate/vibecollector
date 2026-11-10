@@ -1,5 +1,6 @@
 ui/node_modules
 ui/dist
+ui/embed_dist.go
 *.db
 *.db-wal
 *.db-shm

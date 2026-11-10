@@ -4,7 +4,6 @@ import (
 	"context"
 	"errors"
 	"flag"
-	"io/fs"
 	"log/slog"
 	"net/netip"
 	"os"
@@ -29,6 +28,7 @@ import (
 	"vibecollector/internal/sequence"
 	"vibecollector/internal/store"
 	"vibecollector/internal/template"
+	"vibecollector/ui"
 )
 
 func main() {
@@ -103,7 +103,7 @@ func run(cfg *config.Config) int {
 		slog.Error("query", "err", err)
 		return 1
 	}
-	httpSrv, err := api.NewServer(cfg.HTTP, cfg.OAuth2, query, counters, emptyFS{})
+	httpSrv, err := api.NewServer(cfg.HTTP, cfg.OAuth2, query, counters, ui.Files)
 	if err != nil {
 		slog.Error("http", "err", err)
 		return 1
@@ -234,11 +234,6 @@ func run(cfg *config.Config) int {
 	}
 	return exit
 }
-
-// emptyFS is the UI tree until the UI package exists. Static files are not the REST API.
-type emptyFS struct{}
-
-func (emptyFS) Open(string) (fs.File, error) { return nil, fs.ErrNotExist }
 
 // newPipeline builds the three stubs and their caches. Each log line is the
 // startup statement that this process does not send addresses anywhere.

@@ -15,6 +15,7 @@ import (
 	"path/filepath"
 	"strings"
 	"testing"
+	"testing/fstest"
 	"time"
 	_ "time/tzdata"
 
@@ -500,6 +501,55 @@ func TestListenLoopback(t *testing.T) {
 	cancel()
 	if err := <-errc; err != nil {
 		t.Fatal(err)
+	}
+}
+
+func TestStaticUINotGated(t *testing.T) {
+	db := openDB(t)
+	q, err := store.NewQuery(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	const marker = "VibeCollector UI shell"
+	ui := fstest.MapFS{
+		"index.html":    &fstest.MapFile{Data: []byte(marker)},
+		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)\n")},
+	}
+	s, err := NewServer(config.HTTP{
+		Listen:            "127.0.0.1:0",
+		APIPrefix:         "/api/v1",
+		QueryCacheTTL:     15 * time.Second,
+		QueryCacheEntries: 32,
+	}, config.OAuth2{
+		UIClientID: "vibecollector-ui",
+		TokenTTL:   time.Hour,
+	}, q, obs.NewCounters(), ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	index := call(s, http.MethodGet, "/", nil, nil)
+	if index.Code != http.StatusOK || !strings.Contains(index.Body.String(), marker) {
+		t.Fatalf("index %d %s", index.Code, index.Body.String())
+	}
+	flows := call(s, http.MethodGet, "/flows", nil, nil)
+	if flows.Code != http.StatusOK || !strings.Contains(flows.Body.String(), marker) {
+		t.Fatalf("spa %d %s", flows.Code, flows.Body.String())
+	}
+	js := call(s, http.MethodGet, "/assets/app.js", nil, nil)
+	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), "console.log") {
+		t.Fatalf("asset %d %s", js.Code, js.Body.String())
+	}
+	missing := call(s, http.MethodGet, "/assets/missing.js", nil, nil)
+	if missing.Code != http.StatusNotFound {
+		t.Fatalf("missing asset %d", missing.Code)
+	}
+	health := call(s, http.MethodGet, "/api/v1/health", nil, nil)
+	if health.Code != http.StatusUnauthorized || strings.Contains(health.Body.String(), marker) {
+		t.Fatalf("health %d %s", health.Code, health.Body.String())
+	}
+	spec := call(s, http.MethodGet, "/openapi.json", nil, nil)
+	if spec.Code != http.StatusOK || strings.Contains(spec.Body.String(), marker) || !strings.Contains(spec.Body.String(), "openapi") {
+		t.Fatalf("openapi %d %s", spec.Code, spec.Body.String())
 	}
 }
 

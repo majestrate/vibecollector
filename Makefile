@@ -1,7 +1,10 @@
 .PHONY: build test
 
 build:
-	CGO_ENABLED=0 go build -o vibecollector ./cmd/vibecollector
+	pnpm --dir ui install --frozen-lockfile
+	pnpm --dir ui build
+	cp ui/embed_dist.snippet ui/embed_dist.go
+	CGO_ENABLED=0 go build -o vibecollector ./cmd/vibecollector; status=$$?; rm -f ui/embed_dist.go; exit $$status
 
 test:
 	CGO_ENABLED=0 go test ./...

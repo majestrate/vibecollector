@@ -1,0 +1,135 @@
+:root {
+  color-scheme: light;
+  font-family: system-ui, sans-serif;
+  font-size: 14px;
+  line-height: 1.4;
+  color: #1c2430;
+  background: #f4f6f8;
+}
+
+body {
+  margin: 0;
+}
+
+a {
+  color: #1f4e79;
+}
+
+button,
+input,
+select {
+  font: inherit;
+}
+
+button {
+  cursor: pointer;
+}
+
+button.on {
+  background: #1f4e79;
+  color: #fff;
+}
+
+header.top {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 1rem;
+  align-items: center;
+  padding: 0.6rem 1rem;
+  background: #1c2430;
+  color: #fff;
+}
+
+header.top a {
+  color: #fff;
+  text-decoration: none;
+  padding: 0.2rem 0.45rem;
+}
+
+header.top a.active {
+  background: #3d5a80;
+  border-radius: 4px;
+}
+
+header.top nav {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.25rem;
+}
+
+.bar,
+.strip,
+main {
+  padding: 0.75rem 1rem;
+}
+
+.bar {
+  background: #fff;
+  border-bottom: 1px solid #d5dbe3;
+}
+
+.row {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 0.45rem;
+  align-items: end;
+}
+
+label {
+  display: flex;
+  flex-direction: column;
+  gap: 0.15rem;
+  font-size: 12px;
+}
+
+table {
+  border-collapse: collapse;
+  width: 100%;
+  background: #fff;
+}
+
+th,
+td {
+  border-bottom: 1px solid #e2e6ec;
+  padding: 0.35rem 0.5rem;
+  text-align: left;
+  vertical-align: top;
+}
+
+.badge {
+  display: inline-block;
+  margin: 0 0.25rem 0.15rem 0;
+  padding: 0 0.3rem;
+  border-radius: 3px;
+  background: #e7eef6;
+  font-size: 12px;
+}
+
+.warn {
+  color: #8a2b2b;
+  font-weight: 600;
+}
+
+.note {
+  color: #3d4a5c;
+}
+
+.chart {
+  height: 320px;
+  width: 100%;
+  background: #fff;
+}
+
+.strip table {
+  font-size: 12px;
+}
+
+h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem;
+}
+
+h2 {
+  font-size: 1rem;
+  margin: 0.75rem 0 0.25rem;
+}

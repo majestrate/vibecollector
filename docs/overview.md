@@ -36,7 +36,7 @@ Lookup results are cached in memory. GeoIP and ASN change slowly. Reputation cha
 
 ## What the UI is for
 
-The web UI is a React application for exploring the collected data. Every view uses the same time range and the same filters, so a day you select on the map is the same day in the charts and the flow table. The range control includes a calendar day. Day boundaries default to UTC, and you can display another timezone.
+The web UI is a React application for exploring the collected data. Every view uses the same time range and the same filters, so a day you select is the same day in every view. The range control includes a calendar day. Day boundaries default to UTC, and you can display another timezone.
 
 The views are:
 
@@ -46,13 +46,9 @@ The views are:
 - an ASN breakdown
 - reputation hits
 - a flat world map
-- a spherical globe you can rotate
+- a spherical globe
 
-The map and the globe show the same picture in two projections. Countries are shaded by how much traffic the selected flows exchanged with them, and the busiest paths between places are drawn as arcs. The globe uses the same country totals and the same paths on a sphere. Neither view places a point for every flow. Locations come from stored GeoIP annotations, rolled up before they are drawn.
-
-Until a GeoIP provider is configured, the base map and the globe still render, and the geographic layers stay empty. Flows remain available in the table. Addresses that are not globally routable stay off the map.
-
-The map geometry ships with the UI. Browsing a region does not contact a tile service.
+The map and globe routes are in the shell. This build does not draw them and does not contact a tile service. Flows, traffic, top talkers, ASN, and reputation are the views that read the database.
 
 The daemon serves the API behind these views. A production install also serves the built UI from the daemon. During development the UI runs through pnpm and talks to that API.
 
