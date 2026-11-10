@@ -3,6 +3,7 @@
 package flow
 
 import (
+	"errors"
 	"net/netip"
 	"time"
 )
@@ -86,6 +87,31 @@ type ExporterDelta struct {
 	GapPackets      uint64
 	GapRecords      uint64
 }
+
+// Sink is the writer queue. store.Writer is the production sink.
+// enrich.Pipeline.Run is the only caller of Submit. Decode workers do not
+// call Submit. They send decoded flows on main's chan flow.Flow and call
+// SubmitDelta only. SubmitDelta accepts one exporter delta.
+type Sink interface {
+	// Submit enqueues enriched flows for the writer.
+	// flows is the batch the pipeline already annotated.
+	// ErrQueueFull means the writer queue cannot take them. The caller drops
+	// those flows. Submit does not block past the queue.
+	// Decode workers do not call Submit.
+	Submit(flows []Flow) error
+
+	// SubmitDelta accepts one exporter delta from a decode worker.
+	// d is the packet delta, or one gap delta whose domain differs from it.
+	// SubmitDelta does not return an error and does not drop a delta.
+	SubmitDelta(d ExporterDelta)
+}
+
+// ErrQueueFull is what Submit returns when the writer queue cannot take the
+// flows. Pipeline.Run increments dropped_writer_queue and drops those flows.
+// The flow queue does not use this error. A full flow queue is a non-blocking
+// send by the decode worker, which increments dropped_enrich_queue.
+// SubmitDelta has no matching error. A delta is never dropped.
+var ErrQueueFull = errors.New("queue full")
 
 // Endpoint is one address's classification and three provider outcomes.
 // The decoder leaves it zero. The pipeline fills it before Submit.

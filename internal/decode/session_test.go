@@ -509,6 +509,62 @@ func TestIPFIXReplayStopsAtMessageLength(t *testing.T) {
 	}
 }
 
+func TestAcceptWithdrawAndRedefine(t *testing.T) {
+	s, templates, _, _, _, counters := session(t, 64, 8, 8)
+	ip := netip.MustParseAddr("192.0.2.77")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	const domain = 42
+	const id = 256
+	key := template.Key{Exporter: ip, Domain: domain, Version: 10, ID: id}
+	s.Accept(ingest.Datagram{Payload: ipfixPacket(domain, 0, ipfixTemplateSet(id)), Src: ip, ReceivedAt: at})
+	orig, ok := templates.Get(key)
+	if !ok || len(orig.Fields) != 3 || orig.Fields[2].Length != 4 {
+		t.Fatalf("setup %+v %v", orig.Fields, ok)
+	}
+
+	start := make(chan struct{})
+	var wg sync.WaitGroup
+	wg.Add(2)
+	go func() {
+		defer wg.Done()
+		<-start
+		s.Accept(ingest.Datagram{Payload: ipfixPacket(domain, 1, ipfixWithdraw(id)), Src: ip, ReceivedAt: at})
+	}()
+	go func() {
+		defer wg.Done()
+		<-start
+		s.Accept(ingest.Datagram{Payload: ipfixPacket(domain, 2, ipfixTemplateAlt(id)), Src: ip, ReceivedAt: at})
+	}()
+	close(start)
+	done := make(chan struct{})
+	go func() {
+		wg.Wait()
+		close(done)
+	}()
+	select {
+	case <-done:
+	case <-time.After(3 * time.Second):
+		t.Fatal("deadlock")
+	}
+
+	snap := counters.Snapshot()
+	got, ok := templates.Get(key)
+	if snap[obs.TemplatesWithdrawn] != 1 {
+		t.Fatal(snap[obs.TemplatesWithdrawn], snap[obs.TemplateRedefined], ok)
+	}
+	if ok {
+		// Redefine ran last, after the withdrawal, so it is an insert.
+		if snap[obs.TemplateRedefined] != 0 || len(got.Fields) != 3 || got.Fields[2].Type != 2 || got.Fields[2].Length != 8 {
+			t.Fatalf("last definition %+v redefined %d", got.Fields, snap[obs.TemplateRedefined])
+		}
+		return
+	}
+	// Withdrawal ran last, after the field list changed.
+	if snap[obs.TemplateRedefined] != 1 {
+		t.Fatal(snap[obs.TemplateRedefined])
+	}
+}
+
 func TestIPFIXSnapshotFollowsHold(t *testing.T) {
 	s, _, hold, _, _, counters := session(t, 64, 8, 8)
 	ip := netip.MustParseAddr("192.0.2.63")
@@ -581,13 +637,27 @@ func framed(t *testing.T, name string) [][]byte {
 }
 
 func ipfixTemplateSet(id uint16) []byte {
-	body := make([]byte, 16)
+	return ipfixTemplatePairs(id, []uint16{8, 4, 12, 4, 2, 4})
+}
+
+func ipfixTemplateAlt(id uint16) []byte {
+	return ipfixTemplatePairs(id, []uint16{8, 4, 12, 4, 2, 8})
+}
+
+func ipfixTemplatePairs(id uint16, pairs []uint16) []byte {
+	body := make([]byte, 4+len(pairs)*2)
 	binary.BigEndian.PutUint16(body[0:2], id)
-	binary.BigEndian.PutUint16(body[2:4], 3)
-	pairs := []uint16{8, 4, 12, 4, 2, 4}
+	binary.BigEndian.PutUint16(body[2:4], uint16(len(pairs)/2))
 	for i, v := range pairs {
 		binary.BigEndian.PutUint16(body[4+2*i:6+2*i], v)
 	}
+	return flowSet(2, body)
+}
+
+func ipfixWithdraw(id uint16) []byte {
+	body := make([]byte, 4)
+	binary.BigEndian.PutUint16(body[0:2], id)
+	binary.BigEndian.PutUint16(body[2:4], 0)
 	return flowSet(2, body)
 }
 

@@ -36,6 +36,8 @@ Configuration covers:
 - which enrichment providers are enabled
 - how long raw flows and UI aggregates are kept
 
+`udp.listen` defaults to `0.0.0.0:2055`. Ports 4739, 9995, and 9996 are also common, and 9996 is not verified as one vendor's default. The datagram queue defaults to 8192 and the flow queue defaults to 200000. UDP has no exporter allow-list. Any host that can reach the listen address can insert flows. The firewall is the control.
+
 Until a provider client is implemented and enabled, GeoIP, ASN, and reputation stay empty. The collector still stores flows.
 
 Bind the HTTP service to localhost unless you intend other machines to open the UI. Flow data is sensitive. Put a reverse proxy with access control in front of the HTTP port if you expose it beyond the collector host.
