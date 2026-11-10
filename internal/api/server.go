@@ -16,6 +16,7 @@ import (
 	"net/http"
 	"net/netip"
 	"net/url"
+	"path"
 	"strconv"
 	"strings"
 	"sync"
@@ -125,8 +126,46 @@ func (s *Server) routes() {
 		s.mux.HandleFunc("GET "+s.prefix+"/"+name, s.route(name))
 	}
 	if s.ui != nil {
-		s.mux.Handle("/", http.FileServer(http.FS(s.ui)))
+		s.mux.Handle("/", s.uiHandler())
 	}
+}
+
+// uiHandler serves the built UI. A client route with no file falls back to
+// index.html so a refresh of /flows stays on the shell. API and OAuth paths
+// are not rewritten. Static files are not token-gated; this handler is
+// registered outside requireAuth.
+func (s *Server) uiHandler() http.Handler {
+	files := http.FileServer(http.FS(s.ui))
+	return http.HandlerFunc(func(w http.ResponseWriter, r *http.Request) {
+		if r.Method != http.MethodGet && r.Method != http.MethodHead {
+			http.NotFound(w, r)
+			return
+		}
+		p := path.Clean("/" + r.URL.Path)
+		if p == "/openapi.json" || p == "/oauth" || strings.HasPrefix(p, "/oauth/") || p == s.prefix || strings.HasPrefix(p, s.prefix+"/") {
+			http.NotFound(w, r)
+			return
+		}
+		name := strings.TrimPrefix(p, "/")
+		if name != "" && name != "." {
+			f, err := s.ui.Open(name)
+			if err != nil {
+				if strings.Contains(path.Base(name), ".") {
+					http.NotFound(w, r)
+					return
+				}
+				r2 := r.Clone(r.Context())
+				u := *r.URL
+				u.Path = "/"
+				u.RawPath = ""
+				r2.URL = &u
+				files.ServeHTTP(w, r2)
+				return
+			}
+			_ = f.Close()
+		}
+		files.ServeHTTP(w, r)
+	})
 }
 
 // ListenAndServe binds cfg.Listen and serves until ctx is canceled.
