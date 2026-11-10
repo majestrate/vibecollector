@@ -8,7 +8,6 @@ import {
   formatInZone,
   knownZone,
   relativeWindow,
-  todayInZone,
   useFilters,
 } from "./filters";
 import { asText, bumpQueries, QueryNotice, useRefresh } from "./query";
@@ -45,7 +44,9 @@ type Draft = Record<(typeof FIELD_KEYS)[number], string> & { sampled: "" | "true
  */
 export function Shell(): ReactElement {
   const { filters, setFilters } = useFilters();
-  const [day, setDay] = useState(() => (filters.preset === "day" ? civilDay(filters.start, filters.tz) : todayInZone(filters.tz)));
+  const [day, setDay] = useState(() =>
+    filters.preset === "day" ? civilDay(filters.start, filters.tz) : civilDay(new Date().toISOString(), filters.tz),
+  );
   const [adjusted, setAdjusted] = useState(() => initialAdjusted(filters));
   const [tzDraft, setTzDraft] = useState(filters.tz);
   const [tzError, setTzError] = useState("");
@@ -70,7 +71,11 @@ export function Shell(): ReactElement {
     }
     const next = url.pathname + url.search + url.hash;
     const now = window.location.pathname + window.location.search + window.location.hash;
-    if (next !== now) window.history.replaceState(null, "", next);
+    if (next !== now) {
+      // react-router keeps its history index on this state. null would drop it.
+      const prior: unknown = window.history.state;
+      window.history.replaceState(prior !== null && typeof prior === "object" ? { ...prior } : prior, "", next);
+    }
   }, [filters, day]);
 
   function applyRelative(preset: "15m" | "1h" | "6h" | "24h"): void {
@@ -324,19 +329,24 @@ function ExporterStrip(): ReactElement {
   const [error, setError] = useState<unknown>(null);
 
   useEffect(() => {
+    let current = 0;
     let cancel = false;
     async function load(): Promise<void> {
+      const seq = ++current;
       try {
         const [exporters, counters] = await Promise.all([
           getJSON<{ exporters: ExporterRow[] }>("/exporters", { fresh: true }),
           getJSON<Record<string, number | string>>("/stats", { fresh: true }),
         ]);
-        if (cancel) return;
+        if (cancel || seq !== current) return;
         setRows(exporters.exporters ?? []);
         setStats(counters);
         setError(null);
       } catch (err) {
-        if (!cancel) setError(err);
+        if (cancel || seq !== current) return;
+        setRows([]);
+        setStats(null);
+        setError(err);
       }
     }
     void load();
@@ -355,8 +365,8 @@ function ExporterStrip(): ReactElement {
         </p>
       ) : null}
       <QueryNotice error={error} />
-      {rows.length === 0 ? <p className="note">No exporters yet.</p> : null}
-      {rows.length > 0 ? (
+      {!error && rows.length === 0 ? <p className="note">No exporters yet.</p> : null}
+      {!error && rows.length > 0 ? (
         <table>
           <thead>
             <tr>

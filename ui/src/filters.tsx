@@ -97,15 +97,6 @@ export function knownZone(tz: string): boolean {
   }
 }
 
-/**
- * todayInZone returns the civil date YYYY-MM-DD of the current instant in tz.
- * tz is an IANA name. An empty tz means UTC.
- * It throws RangeError when tz cannot be resolved.
- */
-export function todayInZone(tz: string): string {
-  return formatInZone(rfc(Date.now()), tz).slice(0, 10);
-}
-
 /** FilterContext holds the one filter set every view reads. */
 export const FilterContext: Context<Filters> = createContext<Filters>({
   start: "",

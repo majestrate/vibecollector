@@ -1,7 +1,10 @@
 import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
-import { Unauthorized } from "./api";
+import { LoginFailed, Unauthorized } from "./api";
+import { startLogin } from "./auth";
 import { useFilters } from "./filters";
 import { FilterOutsideRaw, getJSON, QueryTimeout } from "./geo/fetch";
+
+const API_ERRORS = new Set(["bad_range", "query_failed", "encode", "unauthorized"]);
 
 let revision = 0;
 const listeners = new Set<() => void>();
@@ -87,9 +90,28 @@ export function useGET<T>(route: string, extra?: Record<string, string | undefin
  * QueryNotice explains a failed or raw-flow result.
  * error is the rejection from useGET. source is the response source field.
  * FilterOutsideRaw replaces any previous series with the retention sentence.
+ * LoginFailed shows its message and a Sign in action. An API error code is shown as that code.
  * A null result means there is nothing to say.
  */
 export function QueryNotice({ error, source }: { error?: unknown; source?: string }): ReactElement | null {
+  const [retry, setRetry] = useState<string | null>(null);
+  if (error instanceof LoginFailed) {
+    return (
+      <p className="warn">
+        {retry ?? error.message}{" "}
+        <button
+          type="button"
+          onClick={() => {
+            void startLogin().catch((err: unknown) => {
+              setRetry(err instanceof Error ? err.message : "Sign-in failed.");
+            });
+          }}
+        >
+          Sign in
+        </button>
+      </p>
+    );
+  }
   if (error instanceof Unauthorized) return <p>Signing in…</p>;
   if (error instanceof FilterOutsideRaw) {
     return (
@@ -100,6 +122,7 @@ export function QueryNotice({ error, source }: { error?: unknown; source?: strin
     );
   }
   if (error instanceof QueryTimeout) return <p className="warn">The query timed out.</p>;
+  if (error instanceof Error && API_ERRORS.has(error.message)) return <p className="warn">{error.message}</p>;
   if (error) return <p className="warn">The query failed.</p>;
   if (source === "flows") return <p className="note">These numbers were aggregated from raw flows.</p>;
   return null;

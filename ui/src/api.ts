@@ -7,13 +7,24 @@ const DATA_ROUTES = ["health", "stats", "exporters", "flows", "timeseries", "tal
 const FILTER_KEYS = ["src", "dst", "port", "src_port", "dst_port", "proto", "exporter", "country", "asn", "reputation", "sampled"] as const;
 
 /**
- * Unauthorized is a rejected REST call with status 401.
- * The shell starts the login redirect again. The previous body is not data.
+ * Unauthorized is a rejected REST call with status 401 after the login redirect has started.
+ * The previous body is not data.
  */
 export class Unauthorized extends Error {
   constructor() {
     super("unauthorized");
     this.name = "Unauthorized";
+  }
+}
+
+/**
+ * LoginFailed is a 401 whose login redirect did not start.
+ * message is why. The shell shows it with a Sign in action.
+ */
+export class LoginFailed extends Error {
+  constructor(message: string) {
+    super(message);
+    this.name = "LoginFailed";
   }
 }
 
@@ -120,7 +131,8 @@ export function filterSearch(filters: Filters): URLSearchParams {
  * route is the path after the prefix, such as /flows.
  * query is the parameter set. fresh sends Cache-Control: no-store.
  * The result is the status and the parsed body.
- * It rejects with Unauthorized on 401 and starts the login redirect again.
+ * It rejects with Unauthorized on 401 after the login redirect starts.
+ * It rejects with LoginFailed when that redirect cannot start.
  * The bearer comes from memory. It does not read localStorage or the query string.
  */
 export async function apiSend(route: string, opts?: { query?: URLSearchParams; fresh?: boolean }): Promise<{ status: number; body: unknown }> {
@@ -135,7 +147,12 @@ export async function apiSend(route: string, opts?: { query?: URLSearchParams; f
   if (res.status === 401) {
     await res.body?.cancel();
     setAccessToken(null);
-    void startLogin();
+    try {
+      await startLogin();
+    } catch (err) {
+      const message = err instanceof Error ? err.message : "Sign-in failed.";
+      throw new LoginFailed(message);
+    }
     throw new Unauthorized();
   }
   const text = await res.text();

@@ -4,8 +4,6 @@ import react from "@vitejs/plugin-react";
 import type { Plugin } from "vite";
 import { defineConfig } from "vitest/config";
 
-const DAEMON = "http://127.0.0.1:8080";
-
 // UI assets and the Vite client stay on this dev server.
 // Everything else, including /api, /oauth, /openapi.json, and a configured
 // REST prefix, is forwarded to the daemon. Host is preserved so the
@@ -68,13 +66,6 @@ function proxy(req: IncomingMessage, res: ServerResponse): void {
 
 export default defineConfig({
   plugins: [react(), daemonProxy()],
-  server: {
-    proxy: {
-      "/openapi.json": DAEMON,
-      "/oauth": DAEMON,
-      "/api": DAEMON,
-    },
-  },
   test: {
     environment: "node",
   },

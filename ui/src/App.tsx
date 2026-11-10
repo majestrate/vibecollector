@@ -1,7 +1,7 @@
-import { useEffect, useState, type ReactElement } from "react";
+import { useEffect, useRef, useState, type ReactElement } from "react";
 import { useNavigate } from "react-router-dom";
 import { prefixFromSpec } from "./api";
-import { consumeReturn, finishLogin, startLogin } from "./auth";
+import { finishCallback, startLogin } from "./auth";
 import { accessToken, setAPIPrefix } from "./session";
 import { Shell } from "./shell";
 
@@ -11,24 +11,29 @@ import { Shell } from "./shell";
  */
 export function App(): ReactElement {
   const nav = useNavigate();
+  const navRef = useRef(nav);
+  navRef.current = nav;
   const [ready, setReady] = useState(false);
   const [error, setError] = useState<string | null>(null);
 
+  // A new navigate identity must not rerun this effect. The cleaned-up run
+  // would delete the stored return path before the live run can read it.
   useEffect(() => {
     let cancel = false;
     (async () => {
       try {
         const res = await fetch("/openapi.json", { headers: { Accept: "application/json" } });
+        if (cancel) return;
         if (!res.ok) throw new Error("The API document is unavailable.");
         const spec: unknown = await res.json();
+        if (cancel) return;
         setAPIPrefix(prefixFromSpec(spec));
         const params = new URLSearchParams(window.location.search);
         if (window.location.pathname === "/callback" && params.get("code")) {
-          await finishLogin(window.location.search);
-          const ret = consumeReturn();
-          if (cancel) return;
-          nav(ret, { replace: true });
-          setReady(true);
+          const went = await finishCallback(window.location.search, () => cancel, (path) => {
+            navRef.current(path, { replace: true });
+          });
+          if (went && !cancel) setReady(true);
           return;
         }
         if (!accessToken()) {
@@ -43,7 +48,7 @@ export function App(): ReactElement {
     return () => {
       cancel = true;
     };
-  }, [nav]);
+  }, []);
 
   if (error) {
     return (

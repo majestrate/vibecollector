@@ -116,6 +116,22 @@ export function finishLogin(search: string): Promise<void> {
   return exchangeFlight;
 }
 
+/**
+ * finishCallback exchanges the code and sends the operator back to the stored path.
+ * search is the callback query string.
+ * cancelled is true when this caller was cleaned up. That caller does not read
+ * or delete the return path and does not navigate.
+ * navigate receives the path to restore, such as /talkers.
+ * The promise resolves true when this caller navigated.
+ * It rejects when the code exchange fails.
+ */
+export async function finishCallback(search: string, cancelled: () => boolean, navigate: (path: string) => void): Promise<boolean> {
+  await finishLogin(search);
+  if (cancelled()) return false;
+  navigate(consumeReturn());
+  return true;
+}
+
 async function runLogin(): Promise<void> {
   const verifier = randomToken();
   const state = randomToken();

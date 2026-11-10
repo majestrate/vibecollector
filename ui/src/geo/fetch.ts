@@ -95,7 +95,7 @@ export class QueryTimeout extends Error {
  * route is the path after the prefix, such as /flows.
  * filters, when set, are sent in full. extra adds route parameters such as limit.
  * fresh bypasses the hot-query cache. The result is the parsed body.
- * It rejects with FilterOutsideRaw, QueryTimeout, or Unauthorized.
+ * It rejects with FilterOutsideRaw, QueryTimeout, Unauthorized, or LoginFailed.
  * Decimal strings and integers above 2^53 stay strings.
  */
 export async function getJSON<T>(route: string, opts?: {

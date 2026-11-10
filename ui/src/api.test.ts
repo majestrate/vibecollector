@@ -1,6 +1,6 @@
 import { createHash } from "node:crypto";
 import { afterEach, expect, test, vi } from "vitest";
-import { parseJSON, prefixFromSpec } from "./api";
+import { LoginFailed, parseJSON, prefixFromSpec } from "./api";
 import { s256Challenge } from "./auth";
 import type { Filters } from "./filters";
 import { fetchGeo, FilterOutsideRaw, QueryTimeout } from "./geo/fetch";
@@ -105,6 +105,22 @@ test("filter_outside_raw and query_timeout and 401 reject", async () => {
   await expect(fetchGeo(filters)).rejects.toBeInstanceOf(QueryTimeout);
   fetchMock.mockResolvedValueOnce(Response.json({ error: "unauthorized" }, { status: 401 }));
   await expect(fetchGeo(filters)).rejects.toMatchObject({ name: "Unauthorized" });
+});
+
+test("401 surfaces a login redirect that did not start", async () => {
+  setAccessToken("mem-token");
+  setAPIPrefix("/api/v1");
+  vi.stubGlobal("window", { location: { pathname: "/talkers", search: "", origin: "http://127.0.0.1:5173" } });
+  vi.stubGlobal("sessionStorage", {
+    getItem: () => null,
+    setItem() {
+      throw new Error("storage blocked");
+    },
+    removeItem() {},
+  });
+  vi.stubGlobal("fetch", vi.fn(async () => Response.json({ error: "unauthorized" }, { status: 401 })));
+  await expect(fetchGeo(filters)).rejects.toBeInstanceOf(LoginFailed);
+  await expect(fetchGeo(filters)).rejects.toMatchObject({ message: "storage blocked" });
 });
 
 test("prefix comes from the nine data paths", () => {
