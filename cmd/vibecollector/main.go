@@ -79,6 +79,11 @@ func run(cfg *config.Config) int {
 		slog.Error("writer", "err", err)
 		return 1
 	}
+	sweeper, err := store.NewSweeper(db, cfg.DB, counters)
+	if err != nil {
+		slog.Error("sweeper", "err", err)
+		return 1
+	}
 	session, err := newSession(cfg, counters)
 	if err != nil {
 		slog.Error("session", "err", err)
@@ -111,6 +116,8 @@ func run(cfg *config.Config) int {
 	defer pipeCancel()
 	writerCtx, writerCancel := context.WithCancel(context.Background())
 	defer writerCancel()
+	sweeperCtx, sweeperCancel := context.WithCancel(context.Background())
+	defer sweeperCancel()
 
 	// One ticket sequence per source IP. Dequeue order is Accept order for
 	// that IP; a shared channel alone lets a later datagram win the race.
@@ -119,11 +126,18 @@ func run(cfg *config.Config) int {
 	var drainWG sync.WaitGroup
 	var pipeWG sync.WaitGroup
 	var writerWG sync.WaitGroup
+	var sweeperWG sync.WaitGroup
 	var writerErr error
+	var sweeperErr error
 	writerWG.Add(1)
 	go func() {
 		defer writerWG.Done()
 		writerErr = writer.Run(writerCtx)
+	}()
+	sweeperWG.Add(1)
+	go func() {
+		defer sweeperWG.Done()
+		sweeperErr = sweeper.Run(sweeperCtx)
 	}()
 	drainWG.Add(1)
 	go func() {
@@ -163,7 +177,14 @@ func run(cfg *config.Config) int {
 		}
 		exit = 1
 	}
-	// Pipeline.Run has returned. Flush the writer, then checkpoint.
+	// Pipeline.Run has returned. Stop deletes only after that drain, then
+	// flush the writer and checkpoint.
+	sweeperCancel()
+	sweeperWG.Wait()
+	if sweeperErr != nil {
+		slog.Error("sweeper", "err", sweeperErr)
+		exit = 1
+	}
 	writerCancel()
 	writerWG.Wait()
 	if writerErr != nil {
