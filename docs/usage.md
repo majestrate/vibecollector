@@ -71,7 +71,8 @@ Open the web UI and choose a time range. The views read the local database and s
 - **Top talkers** ranks sources and destinations for the selected range. Ports are not ranked.
 - **ASN** groups addresses by autonomous system.
 - **Reputation** lists addresses a reputation provider has marked, with the category that provider returned.
-- **Map** and **Globe** are routes in the shell. This build does not draw them.
+- **Map** is the Equal Earth choropleth of the geo aggregate for the shared range and filters. World geometry ships with the UI. There is no tile server. The map shades countries and draws the busiest paths. It does not draw one mark per flow.
+- **Globe** is a later view. This build does not draw it.
 
 A filter the rollup cannot apply on a range that starts before raw retention shows "this filter is only available inside raw retention". When the API aggregated the numbers from raw flows, the view says so.
 

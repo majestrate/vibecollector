@@ -8,10 +8,15 @@
     "test": "vitest run"
   },
   "dependencies": {
+    "d3-geo": "3.1.2",
+    "d3-scale": "4.0.3",
     "react": "19.3.1",
     "react-dom": "19.3.1",
     "react-router-dom": "7.18.5",
-    "recharts": "3.10.1"
+    "react-simple-maps": "5.0.5",
+    "recharts": "3.10.1",
+    "topojson-client": "3.1.0",
+    "world-atlas": "2.0.2"
   },
   "devDependencies": {
     "@types/node": "24.10.1",

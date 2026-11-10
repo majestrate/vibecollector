@@ -300,7 +300,7 @@ export function Shell(): ReactElement {
           <Route path="/talkers" element={<TalkersView />} />
           <Route path="/asn" element={<ASNView />} />
           <Route path="/reputation" element={<ReputationView />} />
-          <Route path="/map" element={<MapView />} />
+          <Route path="/map" element={<MapView filters={filters} />} />
           <Route path="/globe" element={<GlobeView />} />
           <Route path="*" element={<FlowsView />} />
         </Routes>
