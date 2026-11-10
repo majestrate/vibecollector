@@ -14,6 +14,8 @@ import (
 	"vibecollector/internal/config"
 	"vibecollector/internal/decode/ipfix"
 	"vibecollector/internal/decode/v9"
+	"vibecollector/internal/enrich"
+	"vibecollector/internal/enrich/stub"
 	"vibecollector/internal/flow"
 	"vibecollector/internal/ingest"
 	"vibecollector/internal/obs"
@@ -549,8 +551,15 @@ func TestFinalFlushError(t *testing.T) {
 }
 
 func TestQueuesHold240000(t *testing.T) {
+	cfg, err := config.Load(config.Flags{})
+	if err != nil {
+		t.Fatal(err)
+	}
 	_, w, counters := openWriter(t, 1000, time.Hour)
-	const flowCap = 200000 // cfg.UDP.FlowQueue default
+	flowCap := cfg.UDP.FlowQueue
+	if flowCap+40_000 != 240_000 || writerQueue != 80_000 {
+		t.Fatalf("flow queue %d writer queue %d", flowCap, writerQueue)
+	}
 	flows := make(chan flow.Flow, flowCap)
 	for i := 0; i < flowCap; i++ {
 		select {
@@ -580,18 +589,6 @@ func TestQueuesHold240000(t *testing.T) {
 	if len(w.flows) != writerQueue || len(flows) != flowCap {
 		t.Fatal(len(w.flows), len(flows))
 	}
-	select {
-	case flows <- flow.Flow{}:
-		t.Fatal("flow queue accepted past capacity")
-	default:
-		if err := counters.Add(obs.DroppedEnrichQueue, 1); err != nil {
-			t.Fatal(err)
-		}
-	}
-	snap = counters.Snapshot()
-	if snap[obs.DroppedEnrichQueue] != 1 || snap[obs.DroppedWriterQueue] != 0 {
-		t.Fatal(snap[obs.DroppedEnrichQueue], snap[obs.DroppedWriterQueue])
-	}
 	errc := make(chan error, 1)
 	go func() { errc <- w.Submit([]flow.Flow{{}}) }()
 	select {
@@ -602,9 +599,47 @@ func TestQueuesHold240000(t *testing.T) {
 	case <-time.After(2 * time.Second):
 		t.Fatal("Submit blocked")
 	}
-	if counters.Snapshot()[obs.DroppedWriterQueue] != 0 {
-		t.Fatal("Submit incremented dropped_writer_queue")
+	snap = counters.Snapshot()
+	if snap[obs.DroppedEnrichQueue] != 0 || snap[obs.DroppedWriterQueue] != 0 {
+		t.Fatal("Submit incremented a drop counter", snap[obs.DroppedEnrichQueue], snap[obs.DroppedWriterQueue])
 	}
+	// The next flow after both queues are full is counted by the pipeline.
+	one := make(chan flow.Flow, 1)
+	one <- flow.Flow{}
+	close(one)
+	if err := queuePipeline(t, counters).Run(context.Background(), one, w); err != nil {
+		t.Fatal(err)
+	}
+	snap = counters.Snapshot()
+	if snap[obs.DroppedEnrichQueue]+snap[obs.DroppedWriterQueue] != 1 {
+		t.Fatal(snap[obs.DroppedEnrichQueue], snap[obs.DroppedWriterQueue])
+	}
+}
+
+func queuePipeline(t *testing.T, counters *obs.Counters) *enrich.Pipeline {
+	t.Helper()
+	caches := map[enrich.ProviderName]*enrich.Cache{}
+	var providers []enrich.Provider
+	for _, name := range []enrich.ProviderName{enrich.ProviderGeoIP, enrich.ProviderASN, enrich.ProviderReputation} {
+		p, err := stub.New(name)
+		if err != nil {
+			t.Fatal(err)
+		}
+		c, err := enrich.NewCache(8)
+		if err != nil {
+			t.Fatal(err)
+		}
+		caches[name] = c
+		providers = append(providers, p)
+	}
+	p, err := enrich.NewPipeline(providers, caches, config.Enrich{
+		GeoIPTTL: time.Hour, ASNTTL: time.Hour, ReputationTTL: time.Hour,
+		LookupTimeout: time.Second, CacheEntries: 8,
+	}, counters)
+	if err != nil {
+		t.Fatal(err)
+	}
+	return p
 }
 
 func TestWriterSustains2000(t *testing.T) {

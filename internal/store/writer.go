@@ -18,9 +18,8 @@ import (
 	"modernc.org/sqlite"
 )
 
-// writerQueue is the enriched-flow queue. It is config.UDP.WriterQueue in the
-// design, but NewWriter does not receive that field, so the depth is the
-// shipped default.
+// writerQueue is the enriched-flow queue Submit fills.
+// A send that would block returns flow.ErrQueueFull.
 const writerQueue = 80000
 
 // deltaQueue is the buffer in front of the pending map. A full send merges

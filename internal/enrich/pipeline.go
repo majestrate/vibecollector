@@ -70,13 +70,14 @@ func NewPipeline(providers []Provider, caches map[ProviderName]*Cache, cfg confi
 // Run reads decoded flows from in, fills SrcEnrich and DstEnrich, and
 // Submits each flow to sink. Run is the only caller of flow.Sink.Submit.
 // Decode workers do not call it. Four workers run until ctx is cancelled or
-// in is closed. For each endpoint, Run calls Classify. A scope other than
+// in is closed. Cancellation still submits flows already buffered on in,
+// then returns nil. For each endpoint, Run calls Classify. A scope other than
 // global sets all three outcomes to skipped and does not call Lookup.
 // Otherwise it calls GeoIP, ASN, and reputation in that order.
 // A provider error, a timeout, or no_data still Submits the flow.
 // Submit returning ErrQueueFull increments dropped_writer_queue and drops
-// that flow. A full flow queue is not this counter. Run then returns nil on
-// cancellation. It does not return ErrQueueFull to main.
+// that flow. A full flow queue is not this counter. Run does not return
+// ErrQueueFull to main.
 func (p *Pipeline) Run(ctx context.Context, in <-chan flow.Flow, sink flow.Sink) error {
 	var wg sync.WaitGroup
 	wg.Add(enrichWorkers)
@@ -94,17 +95,38 @@ func (p *Pipeline) worker(ctx context.Context, in <-chan flow.Flow, sink flow.Si
 	for {
 		select {
 		case <-ctx.Done():
+			// Both arms can be ready. Take what is already buffered before
+			// returning, or those flows never reach Submit.
+			p.drainQueued(ctx, in, sink)
 			return
 		case f, ok := <-in:
 			if !ok {
 				return
 			}
-			f.SrcEnrich = p.annotate(ctx, f.Src)
-			f.DstEnrich = p.annotate(ctx, f.Dst)
-			if err := sink.Submit([]flow.Flow{f}); errors.Is(err, flow.ErrQueueFull) {
-				_ = p.counters.Add(obs.DroppedWriterQueue, 1)
-			}
+			p.submitOne(ctx, f, sink)
 		}
+	}
+}
+
+func (p *Pipeline) drainQueued(ctx context.Context, in <-chan flow.Flow, sink flow.Sink) {
+	for {
+		select {
+		case f, ok := <-in:
+			if !ok {
+				return
+			}
+			p.submitOne(ctx, f, sink)
+		default:
+			return
+		}
+	}
+}
+
+func (p *Pipeline) submitOne(ctx context.Context, f flow.Flow, sink flow.Sink) {
+	f.SrcEnrich = p.annotate(ctx, f.Src)
+	f.DstEnrich = p.annotate(ctx, f.Dst)
+	if err := sink.Submit([]flow.Flow{f}); errors.Is(err, flow.ErrQueueFull) {
+		_ = p.counters.Add(obs.DroppedWriterQueue, 1)
 	}
 }
 

@@ -355,6 +355,33 @@ func TestQueueFullDropsAndRunIgnoresIt(t *testing.T) {
 	}
 }
 
+func TestCancelSubmitsBufferedFlows(t *testing.T) {
+	p, _ := testPipeline(t, three(nil), enrichCfg(time.Hour, time.Second))
+	sink := &memSink{}
+	ctx, cancel := context.WithCancel(context.Background())
+	in := make(chan flow.Flow, 2)
+	in <- basicFlow("10.1.0.1", "10.1.0.2")
+	in <- basicFlow("10.2.0.1", "10.2.0.2")
+	errc := make(chan error, 1)
+	go func() {
+		errc <- p.Run(ctx, in, sink)
+	}()
+	cancel()
+	select {
+	case err := <-errc:
+		if err != nil {
+			t.Fatal(err)
+		}
+	case <-time.After(2 * time.Second):
+		t.Fatal("Run did not return")
+	}
+	sink.mu.Lock()
+	defer sink.mu.Unlock()
+	if len(sink.flows) != 2 {
+		t.Fatalf("submitted %d", len(sink.flows))
+	}
+}
+
 func TestRunReturnsNilOnCancel(t *testing.T) {
 	p, _ := testPipeline(t, three(nil), enrichCfg(time.Hour, time.Second))
 	ctx, cancel := context.WithCancel(context.Background())
