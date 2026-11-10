@@ -14,6 +14,7 @@ import (
 	"vibecollector/internal/flow"
 	"vibecollector/internal/ingest"
 	"vibecollector/internal/obs"
+	"vibecollector/internal/sampling"
 	"vibecollector/internal/sequence"
 )
 
@@ -145,7 +146,7 @@ func TestFixtureShapes(t *testing.T) {
 func TestWrapAndSkewResults(t *testing.T) {
 	export := time.Unix(1_700_000_000, 0).UTC()
 	counters := obs.NewCounters()
-	flows, _, err := Parse(datagram(readFixture(t, "v5_wrap.bin"), export), sequence.NewTable(), counters, 2*time.Hour, 5*time.Second)
+	flows, _, err := Parse(datagram(readFixture(t, "v5_wrap.bin"), export), nil, sequence.NewTable(), counters, 2*time.Hour, 5*time.Second)
 	if err != nil || len(flows) != 1 {
 		t.Fatalf("wrap err %v flows %d", err, len(flows))
 	}
@@ -161,7 +162,7 @@ func TestWrapAndSkewResults(t *testing.T) {
 	}
 
 	counters = obs.NewCounters()
-	flows, _, err = Parse(datagram(readFixture(t, "v5_skew.bin"), export), sequence.NewTable(), counters, 2*time.Hour, 5*time.Second)
+	flows, _, err = Parse(datagram(readFixture(t, "v5_skew.bin"), export), nil, sequence.NewTable(), counters, 2*time.Hour, 5*time.Second)
 	if err != nil || len(flows) != 1 {
 		t.Fatalf("skew err %v flows %d", err, len(flows))
 	}
@@ -180,7 +181,7 @@ func TestSequenceGapUnits(t *testing.T) {
 	pkts := packets(t, readFixture(t, "v5_sequence.bin"))
 	var gap uint64
 	for _, p := range pkts {
-		_, delta, err := Parse(datagram(p, export), tab, counters, 2*time.Hour, 5*time.Second)
+		_, delta, err := Parse(datagram(p, export), nil, tab, counters, 2*time.Hour, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -206,7 +207,7 @@ func TestReorderCounters(t *testing.T) {
 	counters := obs.NewCounters()
 	tab := sequence.NewTable()
 	for _, p := range packets(t, readFixture(t, "v5_reorder.bin")) {
-		if _, _, err := Parse(datagram(p, export), tab, counters, 2*time.Hour, 5*time.Second); err != nil {
+		if _, _, err := Parse(datagram(p, export), nil, tab, counters, 2*time.Hour, 5*time.Second); err != nil {
 			t.Fatal(err)
 		}
 	}
@@ -224,35 +225,35 @@ func TestMalformed(t *testing.T) {
 	src := netip.MustParseAddr("192.0.2.5")
 
 	counters := obs.NewCounters()
-	_, delta, err := Parse(ingest.Datagram{Payload: []byte{0}, Src: src, ReceivedAt: export}, sequence.NewTable(), counters, time.Hour, time.Second)
+	_, delta, err := Parse(ingest.Datagram{Payload: []byte{0}, Src: src, ReceivedAt: export}, nil, sequence.NewTable(), counters, time.Hour, time.Second)
 	if !errors.Is(err, decode.ErrMalformed) || delta.Version != 0 || delta.Domain != 0 || delta.Malformed != 1 {
 		t.Fatalf("short %+v %v", delta, err)
 	}
 
 	badVer := make([]byte, 24)
 	binary.BigEndian.PutUint16(badVer[0:2], 9)
-	_, delta, err = Parse(ingest.Datagram{Payload: badVer, Src: src, ReceivedAt: export}, sequence.NewTable(), counters, time.Hour, time.Second)
+	_, delta, err = Parse(ingest.Datagram{Payload: badVer, Src: src, ReceivedAt: export}, nil, sequence.NewTable(), counters, time.Hour, time.Second)
 	if !errors.Is(err, decode.ErrMalformed) || delta.Version != 0 || delta.Domain != 0 {
 		t.Fatalf("version %+v %v", delta, err)
 	}
 
 	tab := sequence.NewTable()
 	counters = obs.NewCounters()
-	_, delta, err = Parse(datagram(headerOnly(0, 50), export), tab, counters, time.Hour, time.Second)
+	_, delta, err = Parse(datagram(headerOnly(0, 50), export), nil, tab, counters, time.Hour, time.Second)
 	if !errors.Is(err, decode.ErrMalformed) || delta.Version != 5 || delta.Domain != 258 {
 		t.Fatalf("count 0 %+v %v", delta, err)
 	}
-	flows, delta, err := Parse(datagram(oneRecord(60, 1), export), tab, counters, time.Hour, time.Second)
+	flows, delta, err := Parse(datagram(oneRecord(60, 1), export), nil, tab, counters, time.Hour, time.Second)
 	if err != nil || len(flows) != 1 || delta.GapFlows != 0 {
 		t.Fatalf("after count 0: flows %d gap %d err %v", len(flows), delta.GapFlows, err)
 	}
 
 	tab = sequence.NewTable()
-	_, _, err = Parse(datagram(headerOnly(31, 5), export), tab, counters, time.Hour, time.Second)
+	_, _, err = Parse(datagram(headerOnly(31, 5), export), nil, tab, counters, time.Hour, time.Second)
 	if !errors.Is(err, decode.ErrMalformed) {
 		t.Fatal(err)
 	}
-	_, delta, err = Parse(datagram(oneRecord(5, 1), export), tab, counters, time.Hour, time.Second)
+	_, delta, err = Parse(datagram(oneRecord(5, 1), export), nil, tab, counters, time.Hour, time.Second)
 	if err != nil || delta.GapFlows != 0 || counters.Snapshot()[obs.SequenceReorder] != 0 {
 		t.Fatalf("after count 31 gap %d reorder %d err %v", delta.GapFlows, counters.Snapshot()[obs.SequenceReorder], err)
 	}
@@ -260,11 +261,11 @@ func TestMalformed(t *testing.T) {
 	// A parsed header with a missing record still consumes its sequence.
 	tab = sequence.NewTable()
 	counters = obs.NewCounters()
-	_, delta, err = Parse(datagram(headerOnly(1, 10), export), tab, counters, time.Hour, time.Second)
+	_, delta, err = Parse(datagram(headerOnly(1, 10), export), nil, tab, counters, time.Hour, time.Second)
 	if !errors.Is(err, decode.ErrMalformed) || delta.Version != 5 {
 		t.Fatalf("truncated %+v %v", delta, err)
 	}
-	_, delta, err = Parse(datagram(oneRecord(12, 1), export), tab, counters, time.Hour, time.Second)
+	_, delta, err = Parse(datagram(oneRecord(12, 1), export), nil, tab, counters, time.Hour, time.Second)
 	if err != nil || delta.GapFlows != 1 {
 		t.Fatalf("truncated gap %d err %v", delta.GapFlows, err)
 	}
@@ -274,7 +275,7 @@ func TestUnmappedExporter(t *testing.T) {
 	export := time.Unix(1_700_000_000, 0).UTC()
 	d := datagram(oneRecord(1, 1), export)
 	d.Src = netip.MustParseAddr("::ffff:192.0.2.5")
-	flows, delta, err := Parse(d, sequence.NewTable(), obs.NewCounters(), time.Hour, time.Second)
+	flows, delta, err := Parse(d, nil, sequence.NewTable(), obs.NewCounters(), time.Hour, time.Second)
 	if err != nil || len(flows) != 1 {
 		t.Fatal(err)
 	}
@@ -291,7 +292,7 @@ func TestSamplingStoredPackets(t *testing.T) {
 	var ns []*uint32
 	var modes []*uint8
 	for _, p := range packets(t, readFixture(t, "v5_sampling.bin")) {
-		flows, _, err := Parse(datagram(p, export), sequence.NewTable(), obs.NewCounters(), 2*time.Hour, 5*time.Second)
+		flows, _, err := Parse(datagram(p, export), nil, sequence.NewTable(), obs.NewCounters(), 2*time.Hour, 5*time.Second)
 		if err != nil {
 			t.Fatal(err)
 		}
@@ -411,7 +412,7 @@ func compareFixture(t *testing.T, raw []byte, exp fixture) {
 		"malformed":                  obs.Malformed,
 	}
 	for i, p := range pkts {
-		flows, delta, err := Parse(ingest.Datagram{Payload: p, Src: exporter, ReceivedAt: received}, tab, counters, maxAge, skew)
+		flows, delta, err := Parse(ingest.Datagram{Payload: p, Src: exporter, ReceivedAt: received}, nil, tab, counters, maxAge, skew)
 		if err != nil {
 			t.Fatalf("packet %d: %v", i, err)
 		}
@@ -588,6 +589,50 @@ func headerOnly(count uint16, seq uint32) []byte {
 	b[20] = 1
 	b[21] = 2
 	return b
+}
+
+func TestDeviceSamplingCache(t *testing.T) {
+	at := time.Unix(1_700_000_000, 0).UTC()
+	samples := sampling.NewCache()
+	counters := obs.NewCounters()
+	truncated := headerOnly(1, 10)
+	binary.BigEndian.PutUint16(truncated[22:24], 0xC064)
+	_, _, err := Parse(datagram(truncated, at), samples, sequence.NewTable(), counters, 2*time.Hour, 5*time.Second)
+	if !errors.Is(err, decode.ErrMalformed) {
+		t.Fatal(err)
+	}
+	ip := netip.MustParseAddr("192.0.2.5")
+	got, ok := samples.Lookup(ip, 258, []string{"device"})
+	if !ok || got.N != 100 || got.Algorithm != 3 || !got.Sampled {
+		t.Fatalf("truncated %+v %v", got, ok)
+	}
+	unknown := headerOnly(0, 1)
+	samples = sampling.NewCache()
+	if _, _, err := Parse(datagram(unknown, at), samples, sequence.NewTable(), obs.NewCounters(), 2*time.Hour, 5*time.Second); !errors.Is(err, decode.ErrMalformed) {
+		t.Fatal(err)
+	}
+	got, ok = samples.Lookup(ip, 258, []string{"device"})
+	if !ok || got.N != 0 || got.Sampled || got.Algorithm != 0 {
+		t.Fatalf("zero N %+v %v", got, ok)
+	}
+	mapped := netip.MustParseAddr("::ffff:192.0.2.5")
+	body := oneRecord(3, 42)
+	binary.BigEndian.PutUint16(body[22:24], 0x4002)
+	samples = sampling.NewCache()
+	flows, _, err := Parse(ingest.Datagram{Payload: body, Src: mapped, ReceivedAt: at}, samples, sequence.NewTable(), obs.NewCounters(), 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 || flows[0].Packets != 42 || !flows[0].Sampled {
+		t.Fatal(err, flows)
+	}
+	if flows[0].SamplingInterval == nil || *flows[0].SamplingInterval != 2 || flows[0].Exporter != ip {
+		t.Fatal(flows[0].SamplingInterval, flows[0].Exporter)
+	}
+	got, ok = samples.Lookup(ip, 258, []string{"device"})
+	if !ok || got.N != 2 || got.Algorithm != 1 || !got.Sampled {
+		t.Fatalf("mapped %+v %v", got, ok)
+	}
+	if _, _, err := Parse(datagram(body, at), nil, sequence.NewTable(), obs.NewCounters(), 2*time.Hour, 5*time.Second); err != nil {
+		t.Fatal(err)
+	}
 }
 
 func oneRecord(seq, pkts uint32) []byte {

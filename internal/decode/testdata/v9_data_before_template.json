@@ -1,0 +1,72 @@
+{
+  "received_at": "2023-11-14T22:13:20Z",
+  "max_age": "2h",
+  "skew": "5s",
+  "exporter": "192.0.2.8",
+  "packets": [
+    {
+      "counters": {
+        "malformed": 0,
+        "missing_template": 1,
+        "count_disagrees": 0,
+        "padding_nonzero": 0,
+        "reserved_set": 0,
+        "non_flow_records": 0,
+        "sequence_gap_v9_packets": 0,
+        "sequence_duplicate": 0,
+        "sequence_reorder": 0,
+        "sequence_reset": 0,
+        "sequence_unresolved": 0,
+        "template_redefined": 0,
+        "template_evicted": 0,
+        "timestamp_skew": 0,
+        "timestamp_suspect": 0,
+        "clock_clamped": 0
+      },
+      "delta": {
+        "version": 9,
+        "domain": 4,
+        "packets": 1,
+        "flows": 0,
+        "malformed": 0,
+        "missing_template": 1,
+        "gap_flows": 0,
+        "gap_packets": 0,
+        "gap_records": 0
+      },
+      "flows": []
+    },
+    {
+      "counters": {
+        "malformed": 0,
+        "missing_template": 1,
+        "count_disagrees": 0,
+        "padding_nonzero": 0,
+        "reserved_set": 0,
+        "non_flow_records": 0,
+        "sequence_gap_v9_packets": 0,
+        "sequence_duplicate": 0,
+        "sequence_reorder": 0,
+        "sequence_reset": 0,
+        "sequence_unresolved": 0,
+        "template_redefined": 0,
+        "template_evicted": 0,
+        "timestamp_skew": 0,
+        "timestamp_suspect": 0,
+        "clock_clamped": 0
+      },
+      "delta": {
+        "version": 9,
+        "domain": 4,
+        "packets": 1,
+        "flows": 0,
+        "malformed": 0,
+        "missing_template": 0,
+        "gap_flows": 0,
+        "gap_packets": 0,
+        "gap_records": 0
+      },
+      "flows": []
+    }
+  ]
+}

@@ -22,14 +22,17 @@ const (
 
 // Parse decodes one NetFlow v5 datagram.
 // d.Src is the exporter. d.Payload is the UDP payload, header included.
-// d.ReceivedAt is the clamp window's anchor. seq is updated by the header
-// flow count when the 24-byte header parses. counters receives malformed,
-// sequence, and timestamp increments.
+// d.ReceivedAt is the clamp window's anchor. samples receives the device-scope
+// fact from the header sampling word whenever the 24-byte header parses,
+// including a truncated body and a count outside 1–30. A nil samples skips
+// that write. seq is updated by the header flow count when the 24-byte header
+// parses. counters receives malformed, sequence, and timestamp increments.
 // maxAge and skew are timestamp_max_age and timestamp_skew_slack. They bound
-// AbsMillis and the receive-window clamp. The device-scope sampling cache is
-// not written here; the flow is stamped through sampling.Rate.
+// AbsMillis and the receive-window clamp.
 // The returned flows use sampling.Rate, so the sampled bit matches v9 and IPFIX.
 // Packets and octets are the exported dPkts and dOctets. They are not multiplied.
+// N is the low 14 bits of the sampling word. Algorithm is the raw top 2 bits.
+// The cached fact is sampled only when N > 1. N of 0 is stored as unknown.
 // A count of 0 or greater than 30, or a payload shorter than 24+count*48,
 // returns a delta with Version 5, increments malformed, and returns
 // decode.ErrMalformed. A header shorter than 24 bytes, or a version other
@@ -37,7 +40,7 @@ const (
 // already 5. Trailing bytes after the records are ignored.
 // A nil seq skips the cursor update. A nil counters skips counter increments.
 // Parse does not touch the template cache, the hold buffer, or SQLite.
-func Parse(d ingest.Datagram, seq *sequence.Table, counters *obs.Counters, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, error) {
+func Parse(d ingest.Datagram, samples *sampling.Cache, seq *sequence.Table, counters *obs.Counters, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, error) {
 	delta := flow.ExporterDelta{
 		Exporter: d.Src.Unmap(),
 		LastSeen: d.ReceivedAt,
@@ -62,6 +65,18 @@ func Parse(d ingest.Datagram, seq *sequence.Table, counters *obs.Counters, maxAg
 	delta.Version = 5
 	delta.Domain = uint32(payload[20])<<8 | uint32(payload[21])
 	sampleWord := binary.BigEndian.Uint16(payload[22:24])
+	if samples != nil {
+		n := uint32(sampleWord & 0x3FFF)
+		samples.Put(sampling.SampleKey{
+			Exporter: delta.Exporter,
+			Domain:   delta.Domain,
+			Scope:    "device",
+		}, sampling.Sample{
+			N:         n,
+			Algorithm: uint8(sampleWord >> 14),
+			Sampled:   n > 1,
+		})
+	}
 
 	if count == 0 || count > maxCount {
 		return malformed(delta, counters)
@@ -106,7 +121,7 @@ func Parse(d ingest.Datagram, seq *sequence.Table, counters *obs.Counters, maxAg
 		f.Domain = delta.Domain
 		f.Version = 5
 		f.ReceivedAt = d.ReceivedAt
-		stamp := decode.ResolveSysUp(d.ReceivedAt, unixSecs, unixNsecs, sysUp, firstOf(rec), lastOf(rec), maxAge, skew)
+		stamp := decode.ResolveSysUp(d.ReceivedAt, unixSecs, unixNsecs, sysUp, firstOf(rec), lastOf(rec), true, true, maxAge, skew)
 		f.ExportTime = stamp.Export
 		f.Start = stamp.Start
 		f.End = stamp.End
@@ -199,4 +214,8 @@ func add(c *obs.Counters, name obs.Name, n uint64) {
 		return
 	}
 	_ = c.Add(name, n)
+}
+
+func init() {
+	decode.RegisterV5Parser(Parse)
 }

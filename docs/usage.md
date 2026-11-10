@@ -44,7 +44,7 @@ Bind the HTTP service to localhost unless you intend other machines to open the 
 
 On each router, switch, or probe, set the NetFlow or IPFIX destination to the collector's IP address and UDP port.
 
-Use a stable source address on the exporter. The collector keeps a template table per exporter and per observation domain. NetFlow v9 and IPFIX send a template that describes later data records. After the collector restarts, decoding resumes when the exporter sends its templates again. Devices that send templates on a timer recover on that timer. Data that arrives without a template is counted and discarded once a small hold buffer fills.
+Use a stable source address on the exporter. Two devices behind one source address need distinct observation domain IDs, or they overwrite each other's templates. The collector keeps a template table per exporter and per observation domain. NetFlow v9 and IPFIX send a template that describes later data records. After the collector restarts, decoding resumes when the exporter sends its templates again. Devices that send templates on a timer recover on that timer. Data that arrives without a template is counted and discarded once a small hold buffer fills.
 
 Export a format the collector accepts: NetFlow v5, NetFlow v9, or IPFIX over UDP. Sampled and unsampled exports are both stored. The UI marks sampled data so those counters are not read as complete traffic.
 
