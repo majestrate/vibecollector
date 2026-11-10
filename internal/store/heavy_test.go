@@ -398,42 +398,102 @@ func TestASNValveNoDoubleCount(t *testing.T) {
 }
 
 func TestHeavyRollsBackWithBatch(t *testing.T) {
-	db, w, counters := openWriter(t, 1, time.Hour)
-	if _, err := db.pool.Exec(`CREATE TRIGGER fail_flows BEFORE INSERT ON flows BEGIN SELECT RAISE(ABORT, 'forced'); END`); err != nil {
-		t.Fatal(err)
-	}
+	// Batch size equals the failing submit so the abort happens in the loop,
+	// inside the talker replace, not on the final flush.
+	db, w, counters := openWriter(t, 400, time.Hour)
 	at := time.Date(2024, 6, 4, 0, 0, 0, 0, time.UTC)
-	bad := eligibleShape(at, at, "192.0.2.81")
-	bad.Src = netip.MustParseAddr("203.0.113.81")
-	bad.Octets = 42
-	if err := w.Submit([]flow.Flow{bad}); err != nil {
+	const seed = 800
+	flushFlows(t, w, talkerFlows(at, 1, seed, 10))
+	bucket := minuteBucket(at)
+	want := make(map[string]int64, seed)
+	for n := 1; n <= seed; n++ {
+		want[nthAddr(n).String()] = 10
+	}
+	assertSrcTalkers(t, db, bucket, want)
+	if _, o, _ := mustTalker(t, db, bucket, "dst", "203.0.113.50"); o != seed*10 {
+		t.Fatalf("dst seed %d", o)
+	}
+
+	if _, err := db.pool.Exec(`CREATE TRIGGER fail_talker BEFORE INSERT ON talker_1m BEGIN SELECT RAISE(ABORT, 'forced'); END`); err != nil {
 		t.Fatal(err)
 	}
 	cancel, errc := runWriter(t, w)
+	// 800 stored plus 400 new is over the keep count, so a flush prune would
+	// drop keys. The insert trigger fires after that prune, inside the replace.
+	if err := w.Submit(talkerFlows(at, seed+1, 400, 10)); err != nil {
+		t.Fatal(err)
+	}
 	waitMetric(t, counters, obs.SQLiteWriteFailures, 1)
-	if _, err := db.pool.Exec(`DROP TRIGGER fail_flows`); err != nil {
+	if n := mustCount(t, db, `SELECT COUNT(*) FROM flows`); n != seed {
+		t.Fatalf("flows %d", n)
+	}
+	assertSrcTalkers(t, db, bucket, want)
+	for n := seed + 1; n <= seed+400; n++ {
+		if mustCount(t, db, `SELECT COUNT(*) FROM talker_1m WHERE addr = ?`, nthAddr(n).String()) != 0 {
+			t.Fatalf("failed key %s stored", nthAddr(n))
+		}
+	}
+
+	if _, err := db.pool.Exec(`DROP TRIGGER fail_talker`); err != nil {
 		t.Fatal(err)
 	}
-	good := eligibleShape(at, at, "192.0.2.82")
-	good.Src = netip.MustParseAddr("203.0.113.82")
-	good.Octets = 7
-	if err := w.Submit([]flow.Flow{good}); err != nil {
+	if err := w.Submit(talkerFlows(at, 1, 1, 10)); err != nil {
 		t.Fatal(err)
-	}
-	waitCount(t, db, `SELECT COUNT(*) FROM flows`, 1)
-	bucket := minuteBucket(at)
-	if n := mustCount(t, db, `SELECT COUNT(*) FROM talker_1m WHERE addr = ?`, bad.Src.String()); n != 0 {
-		t.Fatal("failed batch stayed in talkers")
-	}
-	if _, o, _ := mustTalker(t, db, bucket, "src", good.Src.String()); o != 7 {
-		t.Fatalf("src %d", o)
-	}
-	if _, o, _ := mustTalker(t, db, bucket, "dst", good.Dst.String()); o != 7 {
-		t.Fatalf("dst %d", o)
 	}
 	cancel()
 	if err := <-errc; err != nil {
 		t.Fatal(err)
+	}
+	want[nthAddr(1).String()] = 20
+	assertSrcTalkers(t, db, bucket, want)
+	if _, o, _ := mustTalker(t, db, bucket, "dst", "203.0.113.50"); o != seed*10+10 {
+		t.Fatalf("dst %d", o)
+	}
+	if n := mustCount(t, db, `SELECT COUNT(*) FROM flows`); n != seed+1 {
+		t.Fatalf("flows %d", n)
+	}
+	if sum := talkerSum(t, db, bucket, "src"); sum != seed*10+10 {
+		t.Fatalf("src sum %d", sum)
+	}
+}
+
+func assertSrcTalkers(t *testing.T, db *DB, bucket int64, want map[string]int64) {
+	t.Helper()
+	rows, err := db.pool.Query(`SELECT addr, octets FROM talker_1m WHERE bucket_ms = ? AND direction = 'src'`, bucket)
+	if err != nil {
+		t.Fatal(err)
+	}
+	defer rows.Close()
+	got := make(map[string]int64, len(want))
+	var sawStar bool
+	for rows.Next() {
+		var addr string
+		var octets int64
+		if err := rows.Scan(&addr, &octets); err != nil {
+			t.Fatal(err)
+		}
+		if addr == otherAddr {
+			sawStar = true
+			if octets != 0 {
+				t.Fatalf("other %d", octets)
+			}
+			continue
+		}
+		got[addr] = octets
+	}
+	if err := rows.Err(); err != nil {
+		t.Fatal(err)
+	}
+	if !sawStar {
+		t.Fatal("missing talker other row")
+	}
+	if len(got) != len(want) {
+		t.Fatalf("src keys %d want %d", len(got), len(want))
+	}
+	for addr, octets := range want {
+		if got[addr] != octets {
+			t.Fatalf("%s octets %d want %d", addr, got[addr], octets)
+		}
 	}
 }
 

@@ -6,6 +6,7 @@ import (
 	"math"
 	"sort"
 	"strconv"
+	"strings"
 	"time"
 
 	"vibecollector/internal/flow"
@@ -540,7 +541,20 @@ func (h *heavyState) planASN(ctx context.Context, conn *sql.Conn, partial map[as
 		if err := conn.QueryRowContext(ctx, `SELECT COUNT(*) FROM asn_1m WHERE bucket_ms = ? AND asn = -1`, minute).Scan(&sentinels); err != nil {
 			return nil, err
 		}
-		if sentinels == 0 && existing+len(batchASNs) < asnKeep {
+		// len(batchASNs) counts every number in the batch as new, so
+		// existing+len is only an upper bound on the union. Below the valve
+		// that bound is already decisive. At or above it, count the batch
+		// numbers this minute does not store. Overlap must not load a snapshot
+		// the post-merge check throws away.
+		union := existing + len(batchASNs)
+		if sentinels == 0 && existing > 0 && union >= asnKeep {
+			absent, err := absentASNCount(ctx, conn, minute, batchASNs)
+			if err != nil {
+				return nil, err
+			}
+			union = existing + absent
+		}
+		if sentinels == 0 && union < asnKeep {
 			continue
 		}
 		b, err := loadASN(ctx, conn, minute)
@@ -566,6 +580,50 @@ func (h *heavyState) planASN(ctx context.Context, conn *sql.Conn, partial map[as
 		skip[minute] = struct{}{}
 	}
 	return skip, nil
+}
+
+// absentASNCount is how many ASN numbers in batch are not already stored for minute.
+// Chunks are disjoint, so summing COUNT(DISTINCT) is the size of the intersection.
+func absentASNCount(ctx context.Context, conn *sql.Conn, minute int64, batch map[int64]struct{}) (int, error) {
+	if len(batch) == 0 {
+		return 0, nil
+	}
+	asns := make([]int64, 0, len(batch))
+	for asn := range batch {
+		asns = append(asns, asn)
+	}
+	// Stay far under SQLite's bound-variable limit. A cold minute can name
+	// every kept ASN in one batch.
+	const chunk = 500
+	var present int
+	for i := 0; i < len(asns); i += chunk {
+		j := i + chunk
+		if j > len(asns) {
+			j = len(asns)
+		}
+		n, err := countStoredASN(ctx, conn, minute, asns[i:j])
+		if err != nil {
+			return 0, err
+		}
+		present += n
+	}
+	return len(asns) - present, nil
+}
+
+func countStoredASN(ctx context.Context, conn *sql.Conn, minute int64, asns []int64) (int, error) {
+	var q strings.Builder
+	q.WriteString(`SELECT COUNT(DISTINCT asn) FROM asn_1m WHERE bucket_ms = ? AND asn != -1 AND asn IN (?`)
+	args := make([]any, 1, len(asns)+1)
+	args[0] = minute
+	args = append(args, asns[0])
+	for _, asn := range asns[1:] {
+		q.WriteString(",?")
+		args = append(args, asn)
+	}
+	q.WriteByte(')')
+	var n int
+	err := conn.QueryRowContext(ctx, q.String(), args...).Scan(&n)
+	return n, err
 }
 
 func (b *asnBucket) distinct() int {
@@ -632,10 +690,6 @@ func (h *heavyState) flushTalkers(ctx context.Context, conn *sql.Conn) error {
 		if b == nil || !b.dirty {
 			continue
 		}
-		if !b.copied {
-			b = b.clone()
-			h.talkers[k] = b
-		}
 		b.prune(talkerKeep)
 		if err := writeTalker(ctx, conn, k, b); err != nil {
 			return err
@@ -649,10 +703,6 @@ func (h *heavyState) flushReps(ctx context.Context, conn *sql.Conn) error {
 		if b == nil || !b.dirty {
 			continue
 		}
-		if !b.copied {
-			b = b.clone()
-			h.reps[k] = b
-		}
 		b.prune(repKeep)
 		if err := writeRep(ctx, conn, k, b); err != nil {
 			return err
@@ -665,10 +715,6 @@ func (h *heavyState) flushPaths(ctx context.Context, conn *sql.Conn) error {
 	for bucket, b := range h.paths {
 		if b == nil || !b.dirty {
 			continue
-		}
-		if !b.copied {
-			b = b.clone()
-			h.paths[bucket] = b
 		}
 		b.prune(pathKeep)
 		if err := writePath(ctx, conn, bucket, b); err != nil {
