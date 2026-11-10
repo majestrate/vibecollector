@@ -6,7 +6,6 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
-	"math"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -1120,8 +1119,8 @@ func (q *Query) geoFlows(ctx context.Context, f Filter, lim int, out Geo) (Geo, 
 				CASE WHEN dst_lat IS NOT NULL AND IFNULL(dst_city, '') != '' THEN IFNULL(dst_region, '') ELSE '' END AS dst_region,
 				CASE WHEN src_lat IS NOT NULL AND IFNULL(src_city, '') != '' THEN src_city ELSE '' END AS src_city,
 				CASE WHEN dst_lat IS NOT NULL AND IFNULL(dst_city, '') != '' THEN dst_city ELSE '' END AS dst_city,
-				ROUND(src_lat, 1) AS src_lat, ROUND(src_lon, 1) AS src_lon,
-				ROUND(dst_lat, 1) AS dst_lat, ROUND(dst_lon, 1) AS dst_lon, packets, octets,
+				ROUND(src_lat * 10) / 10 AS src_lat, ROUND(src_lon * 10) / 10 AS src_lon,
+				ROUND(dst_lat * 10) / 10 AS dst_lat, ROUND(dst_lon * 10) / 10 AS dst_lon, packets, octets,
 				` + placeKey("src") + ` AS src_key, ` + placeKey("dst") + ` AS dst_key
 			FROM flows WHERE ` + w.sql + `
 		) WHERE src_key IS NOT NULL AND dst_key IS NOT NULL
@@ -1154,7 +1153,7 @@ func placeKey(end string) string {
 		WHEN ` + end + `_scope != 'global' OR ` + end + `_geo_outcome != 'value' OR IFNULL(` + end + `_country, '') = '' THEN NULL
 		WHEN ` + end + `_lat IS NOT NULL AND IFNULL(` + end + `_city, '') != '' AND IFNULL(` + end + `_region, '') != '' THEN 'city:' || ` + end + `_country || ':' || ` + end + `_region || ':' || ` + end + `_city
 		WHEN ` + end + `_lat IS NOT NULL AND IFNULL(` + end + `_city, '') != '' THEN 'city:' || ` + end + `_country || ':-:' || ` + end + `_city
-		WHEN ` + end + `_lat IS NOT NULL THEN 'coord:' || ` + end + `_country || ':' || printf('%.1f', ROUND(` + end + `_lat, 1)) || ':' || printf('%.1f', ROUND(` + end + `_lon, 1))
+		WHEN ` + end + `_lat IS NOT NULL THEN 'coord:' || ` + end + `_country || ':' || printf('%.1f', ROUND(` + end + `_lat * 10) / 10) || ':' || printf('%.1f', ROUND(` + end + `_lon * 10) / 10)
 		ELSE 'cc:' || ` + end + `_country END`
 }
 
@@ -1212,21 +1211,11 @@ func makePlace(kind, country, region, city string, lat, lon sql.NullFloat64) Geo
 		}
 	}
 	if (kind == "city" || kind == "coord") && lat.Valid && lon.Valid {
-		p.Lat = roundTenths(lat.Float64)
-		p.Lon = roundTenths(lon.Float64)
+		p.Lat = round1(lat.Float64)
+		p.Lon = round1(lon.Float64)
 		p.HasCoord = true
 	}
 	return p
-}
-
-// roundTenths is the writer's one-decimal place coordinate.
-// The flows fallback must not return a raw sample from the group.
-func roundTenths(v float64) float64 {
-	r := math.Round(v*10) / 10
-	if r == 0 {
-		return 0
-	}
-	return r
 }
 
 func (q *Query) otherPaths(ctx context.Context, start, end time.Time) (octets uint64, pairs int64, err error) {

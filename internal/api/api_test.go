@@ -218,7 +218,7 @@ func TestSharedQueryIgnoresCallerCancel(t *testing.T) {
 
 func TestGeoFlowsRoundedCell(t *testing.T) {
 	s, db := newAPI(t, "/api/v1", "s3cret")
-	start := time.Now().UTC().Add(-2 * time.Minute).Truncate(time.Minute)
+	start := time.Now().UTC().Add(-6 * time.Minute).Truncate(5 * time.Minute)
 	end := start.Add(time.Hour)
 	a := flowAt(start, "203.0.113.5", "198.51.100.9", 443, 4, 40, false, nil, "US", "DE", "")
 	b := flowAt(start, "203.0.113.6", "198.51.100.10", 443, 6, 60, false, nil, "US", "DE", "")
@@ -230,12 +230,15 @@ func TestGeoFlowsRoundedCell(t *testing.T) {
 	b.SrcEnrich.Geo.Lat, b.SrcEnrich.Geo.Lon = 40.31, -74.04
 	b.DstEnrich.Geo.HasLatLon = true
 	b.DstEnrich.Geo.Lat, b.DstEnrich.Geo.Lon = 52.47, 13.44
-	writeFlows(t, db, s.q, []flow.Flow{a, b}, start, end)
+	// 0.15 and -74.05 are tenths where SQLite ROUND(x, 1) and round1 disagree.
+	c := flowAt(start, "203.0.113.7", "198.51.100.11", 80, 1, 10, false, nil, "US", "FR", "")
+	c.SrcEnrich.Geo.HasLatLon = true
+	c.SrcEnrich.Geo.Lat, c.SrcEnrich.Geo.Lon = 0.15, -74.05
+	writeFlows(t, db, s.q, []flow.Flow{a, b, c}, start, end)
 	tok := clientToken(t, s, "s3cret")
+	auth := map[string]string{"Authorization": "Bearer " + tok}
 	win := "start=" + url.QueryEscape(start.Format(time.RFC3339)) + "&end=" + url.QueryEscape(end.Format(time.RFC3339))
-	geo := mustJSON(t, call(s, http.MethodGet, s.prefix+"/geo?"+win+"&port=443", nil, map[string]string{
-		"Authorization": "Bearer " + tok,
-	}).Body.Bytes())
+	geo := mustJSON(t, call(s, http.MethodGet, s.prefix+"/geo?"+win+"&port=443", nil, auth).Body.Bytes())
 	if geo["source"] != "flows" {
 		t.Fatal(geo["source"])
 	}
@@ -249,6 +252,24 @@ func TestGeoFlowsRoundedCell(t *testing.T) {
 	}
 	assertCoord(t, row["src"], "coord", 40.3, -74)
 	assertCoord(t, row["dst"], "coord", 52.5, 13.4)
+
+	half := mustJSON(t, call(s, http.MethodGet, s.prefix+"/geo?"+win+"&port=80", nil, auth).Body.Bytes())
+	if half["source"] != "flows" {
+		t.Fatal(half["source"])
+	}
+	hpaths := half["paths"].([]any)
+	if len(hpaths) != 1 {
+		t.Fatalf("half paths %d", len(hpaths))
+	}
+	assertCoord(t, hpaths[0].(map[string]any)["src"], "coord", 0.2, -74.1)
+
+	roll := mustJSON(t, call(s, http.MethodGet, s.prefix+"/geo?"+win, nil, auth).Body.Bytes())
+	if roll["source"] != "rollup" {
+		t.Fatal(roll["source"])
+	}
+	if !pathHasSrc(roll["paths"].([]any), 0.2, -74.1) || !pathHasSrc(roll["paths"].([]any), 40.3, -74) {
+		t.Fatal(roll["paths"])
+	}
 }
 
 func TestOpenAPI(t *testing.T) {
@@ -570,6 +591,16 @@ func assertCoord(t *testing.T, v any, kind string, lat, lon float64) {
 	if p["kind"] != kind || p["lat"] != lat || p["lon"] != lon {
 		t.Fatal(p)
 	}
+}
+
+func pathHasSrc(paths []any, lat, lon float64) bool {
+	for _, item := range paths {
+		src, _ := item.(map[string]any)["src"].(map[string]any)
+		if src["kind"] == "coord" && src["lat"] == lat && src["lon"] == lon {
+			return true
+		}
+	}
+	return false
 }
 
 func pkceToken(t *testing.T, s *Server) string {
