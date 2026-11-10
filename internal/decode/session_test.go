@@ -10,6 +10,7 @@ import (
 	"time"
 
 	"vibecollector/internal/decode"
+	"vibecollector/internal/decode/ipfix"
 	"vibecollector/internal/decode/v5"
 	"vibecollector/internal/decode/v9"
 	"vibecollector/internal/flow"
@@ -21,9 +22,10 @@ import (
 )
 
 func init() {
-	// v5 and v9 import decode for timestamps, so they register from init.
+	// The version parsers import decode, so they register from init.
 	_ = v5.Parse
 	_ = v9.Parse
+	_ = ipfix.Parse
 }
 
 func TestNilSession(t *testing.T) {
@@ -52,16 +54,20 @@ func TestDispatchUnknownAndV5(t *testing.T) {
 	s, _, _, _, _, counters := session(t, 8, 8, 8)
 	at := time.Unix(1_700_000_000, 0).UTC()
 	ip := netip.MustParseAddr("192.0.2.5")
-	_, delta := s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x0a}, Src: ip, ReceivedAt: at})
+	_, delta := s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x04}, Src: ip, ReceivedAt: at})
 	if delta.Version != 0 || delta.Domain != 0 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != 1 {
 		t.Fatal(delta)
 	}
+	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0x00, 0x0a}, Src: ip, ReceivedAt: at})
+	if delta.Version != 10 || delta.Domain != 0 || delta.Malformed != 1 || counters.Snapshot()[obs.Malformed] != 2 {
+		t.Fatal(delta, counters.Snapshot()[obs.Malformed])
+	}
 	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0}, Src: ip, ReceivedAt: at})
-	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 2 {
+	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 3 {
 		t.Fatal(delta, counters.Snapshot()[obs.Malformed])
 	}
 	_, delta = s.Accept(ingest.Datagram{Payload: []byte{0, 7}, Src: ip, ReceivedAt: at})
-	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 3 {
+	if delta.Version != 0 || counters.Snapshot()[obs.Malformed] != 4 {
 		t.Fatal(delta)
 	}
 	v5pkt := make([]byte, 24+48)
@@ -394,6 +400,47 @@ func TestParallelAccept(t *testing.T) {
 	}
 }
 
+func TestIPFIXHoldRewritesLength(t *testing.T) {
+	s, templates, hold, _, _, counters := session(t, 64, 256, 4096)
+	ip := netip.MustParseAddr("192.0.2.8")
+	at := time.Unix(1_700_000_000, 0).UTC()
+	rec := make([]byte, 12)
+	binary.BigEndian.PutUint32(rec[0:4], 0xCB00710A)
+	binary.BigEndian.PutUint32(rec[4:8], 0xC6336414)
+	binary.BigEndian.PutUint32(rec[8:12], 6)
+	data := ipfixPacket(11, 0, flowSet(4, []byte{0, 0, 0, 0}), flowSet(256, rec))
+	flows, delta := s.Accept(ingest.Datagram{Payload: data, Src: ip, ReceivedAt: at})
+	if len(flows) != 0 || delta.MissingTemplate != 1 || delta.Version != 10 || len(hold.List(ip)) != 1 {
+		t.Fatalf("flows %d delta %+v hold %d", len(flows), delta, len(hold.List(ip)))
+	}
+	ent := hold.List(ip)[0]
+	if ent.RetryAt <= 16 {
+		t.Fatal(ent.RetryAt)
+	}
+	// A shortened replay is malformed until the message length is rewritten.
+	short := append(append([]byte{}, ent.Payload[:16]...), ent.Payload[ent.RetryAt:]...)
+	if _, _, _, err := ipfix.Parse(ingest.Datagram{Payload: short, Src: ip, ReceivedAt: at}, nil, nil, nil, nil, false, 2*time.Hour, 5*time.Second); !errors.Is(err, decode.ErrMalformed) {
+		t.Fatal(err)
+	}
+	body := make([]byte, 16)
+	binary.BigEndian.PutUint16(body[0:2], 256)
+	binary.BigEndian.PutUint16(body[2:4], 3)
+	pairs := []uint16{8, 4, 12, 4, 2, 4}
+	for i, v := range pairs {
+		binary.BigEndian.PutUint16(body[4+2*i:6+2*i], v)
+	}
+	flows, delta = s.Accept(ingest.Datagram{Payload: ipfixPacket(11, 0, flowSet(2, body)), Src: ip, ReceivedAt: at})
+	if len(flows) != 1 || flows[0].Packets != 6 || flows[0].Src.String() != "203.0.113.10" || flows[0].Version != 10 || len(hold.List(ip)) != 0 {
+		t.Fatalf("flows %d hold %d delta %+v", len(flows), len(hold.List(ip)), delta)
+	}
+	if counters.Snapshot()[obs.MissingTemplate] != 1 || counters.Snapshot()[obs.Malformed] != 0 {
+		t.Fatal(counters.Snapshot())
+	}
+	if _, ok := templates.Get(template.Key{Exporter: ip, Domain: 11, Version: 10, ID: 256}); !ok {
+		t.Fatal("template")
+	}
+}
+
 func deps(t *testing.T, cap, per, global int) (*template.Cache, *template.Hold, *sampling.Cache, *sequence.Table, *obs.Counters) {
 	t.Helper()
 	templates, err := template.NewCache(cap)
@@ -431,6 +478,21 @@ func framed(t *testing.T, name string) [][]byte {
 		b = b[n:]
 	}
 	return out
+}
+
+func ipfixPacket(domain, seq uint32, sets ...[]byte) []byte {
+	var body []byte
+	for _, s := range sets {
+		body = append(body, s...)
+	}
+	b := make([]byte, 16+len(body))
+	binary.BigEndian.PutUint16(b[0:2], 10)
+	binary.BigEndian.PutUint16(b[2:4], uint16(len(b)))
+	binary.BigEndian.PutUint32(b[4:8], 1_700_000_000)
+	binary.BigEndian.PutUint32(b[8:12], seq)
+	binary.BigEndian.PutUint32(b[12:16], domain)
+	copy(b[16:], body)
+	return b
 }
 
 func v9Header(count uint16, sysup, unixSecs, seq, source uint32) []byte {

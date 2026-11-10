@@ -1,6 +1,7 @@
 package decode
 
 import (
+	"encoding/binary"
 	"net/netip"
 	"sort"
 	"sync"
@@ -13,6 +14,26 @@ import (
 	"vibecollector/internal/sequence"
 	"vibecollector/internal/template"
 )
+
+// exporterForget drops parser state that is not in the template, hold,
+// sampling, or sequence objects. IPFIX registers it for the cached
+// systemInitTimeMilliseconds. Nil skips the call.
+var exporterForget func(netip.Addr)
+
+// RegisterExporterForget stores the function Session calls when it drops an
+// exporter before the next datagram, or on idle expiry. The IPFIX parser
+// uses it so a cached systemInitTimeMilliseconds does not outlive the
+// exporter. Self-eviction inside a parse does not come through here; that
+// parser clears its own cache before later records in the same datagram.
+// A second call replaces the function. RegisterExporterForget does not
+// return an error.
+func RegisterExporterForget(fn func(netip.Addr)) { exporterForget = fn }
+
+func forgetExporter(ip netip.Addr) {
+	if exporterForget != nil {
+		exporterForget(ip)
+	}
+}
 
 // Session serializes one exporter IP across template.Cache, template.Hold,
 // sampling.Cache, and sequence.Table. Decode workers call Accept.
@@ -60,9 +81,10 @@ func NewSession(templates *template.Cache, hold *template.Hold, samples *samplin
 // IPs run in parallel. Two Accept calls for the same IP do not.
 // d.Payload is the UDP payload. d.ReceivedAt is the reader's timestamp.
 // The returned flows are not enriched. delta is always set. A payload shorter
-// than 2 bytes, or a version other than 5 or 9, still returns a delta with
-// Version 0 and Domain 0 after incrementing malformed once. Version 10 takes
-// that path.
+// than 2 bytes, or a version other than 5, 9, or 10, still returns a delta
+// with Version 0 and Domain 0 after incrementing malformed once. A version
+// whose parser is not registered takes that path. A short IPFIX header is
+// version 10 and malformed.
 // flows may be empty. Accept does not enqueue and does not return an error.
 // When a data set has no template, Accept copies the datagram into Hold under
 // the same mutex. A worker never locks two exporter mutexes.
@@ -94,6 +116,7 @@ func (s *Session) Accept(d ingest.Datagram) (flows []flow.Flow, delta flow.Expor
 		s.noteHoldDrop(s.hold.DropExporter(ip))
 		s.samples.DropExporter(ip)
 		s.seq.DropExporter(ip)
+		forgetExporter(ip)
 	}
 
 	s.templates.Touch(ip, d.ReceivedAt)
@@ -241,6 +264,7 @@ func (s *Session) dropIP(ip netip.Addr) {
 	s.noteHoldDrop(s.hold.DropExporter(ip))
 	s.samples.DropExporter(ip)
 	s.seq.DropExporter(ip)
+	forgetExporter(ip)
 }
 
 func (s *Session) noteHoldDrop(n int) {
@@ -268,8 +292,9 @@ func (s *Session) drain(ip netip.Addr, at time.Time) []flow.Flow {
 			continue
 		}
 		next := missing.RetryAt
-		if stripped && missing.RetryAt > headerLenV9 {
-			next = p.RetryAt + (missing.RetryAt - headerLenV9)
+		hdr := packetHeaderLen(p.Payload)
+		if stripped && missing.RetryAt > hdr {
+			next = p.RetryAt + (missing.RetryAt - hdr)
 		} else if stripped {
 			next = p.RetryAt
 		}
@@ -280,14 +305,26 @@ func (s *Session) drain(ip netip.Addr, at time.Time) []flow.Flow {
 	return out
 }
 
-const headerLenV9 = 20
+func packetHeaderLen(payload []byte) int {
+	if len(payload) >= 2 && binary.BigEndian.Uint16(payload[:2]) == 10 {
+		return 16
+	}
+	return 20
+}
 
+// replayPayload keeps the version header and the bytes from retryAt.
+// IPFIX length counts octets, so a shortened replay rewrites that field.
+// A v9 header stays 20 bytes and is not rewritten.
 func replayPayload(original []byte, retryAt int) ([]byte, bool) {
-	if retryAt <= headerLenV9 || retryAt > len(original) || len(original) < headerLenV9 {
+	hdr := packetHeaderLen(original)
+	if retryAt <= hdr || retryAt > len(original) || len(original) < hdr {
 		return original, false
 	}
-	out := make([]byte, headerLenV9+len(original)-retryAt)
-	copy(out[:headerLenV9], original[:headerLenV9])
-	copy(out[headerLenV9:], original[retryAt:])
+	out := make([]byte, hdr+len(original)-retryAt)
+	copy(out[:hdr], original[:hdr])
+	copy(out[hdr:], original[retryAt:])
+	if hdr == 16 && len(out) >= 4 && len(out) <= 65535 {
+		binary.BigEndian.PutUint16(out[2:4], uint16(len(out)))
+	}
 	return out, true
 }

@@ -16,9 +16,12 @@ type v5Parser func(d ingest.Datagram, samples *sampling.Cache, seq *sequence.Tab
 
 type v9Parser func(d ingest.Datagram, templates *template.Cache, samples *sampling.Cache, seq *sequence.Table, counters *obs.Counters, retry bool, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, *template.Pending, error)
 
+type ipfixParser func(d ingest.Datagram, templates *template.Cache, samples *sampling.Cache, seq *sequence.Table, counters *obs.Counters, retry bool, maxAge, skew time.Duration) ([]flow.Flow, flow.ExporterDelta, *template.Pending, error)
+
 var (
-	parseV5 v5Parser
-	parseV9 v9Parser
+	parseV5    v5Parser
+	parseV9    v9Parser
+	parseIPFIX ipfixParser
 )
 
 // RegisterV5Parser stores the NetFlow v5 parser Dispatch calls.
@@ -31,16 +34,22 @@ func RegisterV5Parser(fn v5Parser) { parseV5 = fn }
 // RegisterV9Parser does not return an error.
 func RegisterV9Parser(fn v9Parser) { parseV9 = fn }
 
-// Dispatch reads the first big-endian uint16 of d.Payload and calls the v5
-// or v9 parser. templates, samples, and seq are the objects whose methods
-// the parser calls. The caller is Session.Accept, which already holds the
-// exporter mutex. retry is true when this payload is a hold replay.
+// RegisterIPFIXParser stores the IPFIX parser Dispatch calls.
+// ipfix.init calls it. A nil parser makes version 10 count as malformed.
+// RegisterIPFIXParser does not return an error.
+func RegisterIPFIXParser(fn ipfixParser) { parseIPFIX = fn }
+
+// Dispatch reads the first big-endian uint16 of d.Payload and calls the v5,
+// v9, or IPFIX parser. templates, samples, and seq are the objects whose
+// methods the parser calls. The caller is Session.Accept, which already holds
+// the exporter mutex. retry is true when this payload is a hold replay.
 // maxAge and skew are timestamp_max_age and timestamp_skew_slack. They are
 // passed through to the parser and are not replaced when zero.
-// A short payload or a version other than 5 or 9 returns a delta with
+// A short payload or a version other than 5, 9, or 10 returns a delta with
 // Version 0 and Domain 0, a nil missing, and a nil error, after counting
-// malformed once. Version 10 is that path until IPFIX is wired.
-// ErrShortSet means one set's length ran past the payload. flows still holds
+// malformed once. A nil registered parser for an otherwise known version
+// takes that same path.
+// ErrShortSet means one set's length ran past the message. flows still holds
 // records from earlier complete sets, and malformed has been incremented once
 // by the parser. missing is non-nil when a data set had no template.
 // Dispatch does not call Hold and does not advance a cursor itself.
@@ -60,6 +69,11 @@ func Dispatch(d ingest.Datagram, templates *template.Cache, samples *sampling.Ca
 			return unknownVersion(d, counters)
 		}
 		return parseV9(d, templates, samples, seq, counters, retry, maxAge, skew)
+	case 10:
+		if parseIPFIX == nil {
+			return unknownVersion(d, counters)
+		}
+		return parseIPFIX(d, templates, samples, seq, counters, retry, maxAge, skew)
 	default:
 		return unknownVersion(d, counters)
 	}
