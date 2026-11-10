@@ -25,6 +25,7 @@ import (
 	"vibecollector/internal/obs"
 	"vibecollector/internal/sampling"
 	"vibecollector/internal/sequence"
+	"vibecollector/internal/store"
 	"vibecollector/internal/template"
 )
 
@@ -68,6 +69,16 @@ func main() {
 
 func run(cfg *config.Config) int {
 	counters := obs.NewCounters()
+	db, err := store.Open(cfg.DB)
+	if err != nil {
+		slog.Error("db", "err", err)
+		return 1
+	}
+	writer, err := store.NewWriter(db, cfg.DB, counters)
+	if err != nil {
+		slog.Error("writer", "err", err)
+		return 1
+	}
 	session, err := newSession(cfg, counters)
 	if err != nil {
 		slog.Error("session", "err", err)
@@ -83,67 +94,87 @@ func run(cfg *config.Config) int {
 	}
 
 	// main owns the flow queue. Decode workers send on it and do not call Submit.
-	// Pipeline.Run is the only Submit caller. There is no writer yet, so the
-	// sink discards enriched flows.
+	// Pipeline.Run is the only Submit caller.
 	datagrams := make(chan ingest.Datagram, cfg.UDP.DatagramQueue)
 	flows := make(chan flow.Flow, cfg.UDP.FlowQueue)
-	sink := discardSink{}
 	pipe, err := newPipeline(cfg, counters)
 	if err != nil {
 		slog.Error("enrich", "err", err)
 		return 1
 	}
 
-	ctx, cancel := context.WithCancel(context.Background())
-	defer cancel()
+	// readerCtx closes the socket. pipeCtx stays live across the datagram
+	// drain so decoded flows already in the queue are still enriched.
+	readerCtx, readerCancel := context.WithCancel(context.Background())
+	defer readerCancel()
+	pipeCtx, pipeCancel := context.WithCancel(context.Background())
+	defer pipeCancel()
+	writerCtx, writerCancel := context.WithCancel(context.Background())
+	defer writerCancel()
 
 	// One ticket sequence per source IP. Dequeue order is Accept order for
 	// that IP; a shared channel alone lets a later datagram win the race.
 	order := newIPOrder()
 	fatalc := make(chan error, 1)
-	var wg sync.WaitGroup
-	wg.Add(1)
+	var drainWG sync.WaitGroup
+	var pipeWG sync.WaitGroup
+	var writerWG sync.WaitGroup
+	var writerErr error
+	writerWG.Add(1)
 	go func() {
-		defer wg.Done()
-		err := reader.Run(ctx, datagrams)
+		defer writerWG.Done()
+		writerErr = writer.Run(writerCtx)
+	}()
+	drainWG.Add(1)
+	go func() {
+		defer drainWG.Done()
+		err := reader.Run(readerCtx, datagrams)
 		close(datagrams)
 		if err != nil {
 			fatalc <- err
 		}
 	}()
 	for i := 0; i < 2; i++ {
-		wg.Add(1)
+		drainWG.Add(1)
 		go func() {
-			defer wg.Done()
-			decodeWorker(session, datagrams, flows, sink, counters, order, nil)
+			defer drainWG.Done()
+			decodeWorker(session, datagrams, flows, writer, counters, order, nil)
 		}()
 	}
-	wg.Add(1)
+	pipeWG.Add(1)
 	go func() {
-		defer wg.Done()
-		// Cancellation returns nil. ErrQueueFull is counted inside Run, not here.
-		_ = pipe.Run(ctx, flows, sink)
+		defer pipeWG.Done()
+		// ErrQueueFull is counted inside Run, not here.
+		_ = pipe.Run(pipeCtx, flows, writer)
 	}()
 
+	exit := 0
 	sig := make(chan os.Signal, 2)
 	signal.Notify(sig, syscall.SIGINT, syscall.SIGTERM)
 	select {
 	case <-sig:
-		// Closing the socket makes Run return and close datagrams.
-		// Workers drain what is already queued; they do not watch ctx.
-		cancel()
-		if !waitStop(&wg, sig) {
+		if !shutdown(readerCancel, pipeCancel, flows, &drainWG, &pipeWG, sig) {
 			return 1
 		}
-		return 0
 	case err := <-fatalc:
 		slog.Error("udp", "err", err)
-		cancel()
-		if !waitStop(&wg, sig) {
+		if !shutdown(readerCancel, pipeCancel, flows, &drainWG, &pipeWG, sig) {
 			return 1
 		}
+		exit = 1
+	}
+	// Pipeline.Run has returned. Flush the writer, then checkpoint.
+	writerCancel()
+	writerWG.Wait()
+	if writerErr != nil {
+		slog.Error("writer", "err", writerErr)
+		exit = 1
+	}
+	if err := db.Checkpoint(); err != nil {
+		slog.Error("checkpoint", "err", err)
 		return 1
 	}
+	return exit
 }
 
 // newPipeline builds the three stubs and their caches. Each log line is the
@@ -289,16 +320,48 @@ func deliver(session *decode.Session, d ingest.Datagram, flows chan<- flow.Flow,
 	}
 }
 
-// discardSink accepts deltas and drops them. There is no writer queue yet.
+// discardSink drops flows and deltas. Tests use it when the writer is not the subject.
 type discardSink struct{}
 
 func (discardSink) Submit([]flow.Flow) error { return nil }
 
 func (discardSink) SubmitDelta(flow.ExporterDelta) {}
 
-// waitStop waits up to 5 seconds for the reader and workers.
-// A second signal returns false so the process can exit 1.
-func waitStop(wg *sync.WaitGroup, sig <-chan os.Signal) bool {
+// shutdown stops the reader and waits for decode workers to finish the
+// datagram queue. It then closes flows so Pipeline.Run can return.
+// The pipeline context stays active until that close. Cancelling it while
+// workers are still decoding drops flows sent after the queue is sampled.
+// A second signal returns false and the process exits 1. When the 5s budget
+// fires first, the pipeline is cancelled and shutdown still returns true so
+// the writer can flush what was submitted.
+func shutdown(readerCancel, pipeCancel context.CancelFunc, flows chan flow.Flow, drain, pipe *sync.WaitGroup, sig <-chan os.Signal) bool {
+	readerCancel()
+	timedOut, signaled := waitStop(drain, sig)
+	if signaled {
+		return false
+	}
+	if !timedOut {
+		close(flows)
+	} else {
+		pipeCancel()
+	}
+	timedOut, signaled = waitStop(pipe, sig)
+	if signaled {
+		return false
+	}
+	if timedOut {
+		pipeCancel()
+		_, signaled = waitStop(pipe, sig)
+		if signaled {
+			return false
+		}
+	}
+	return true
+}
+
+// waitStop waits up to 5 seconds for wg.
+// timedOut means the budget fired. signaled means a second signal.
+func waitStop(wg *sync.WaitGroup, sig <-chan os.Signal) (timedOut, signaled bool) {
 	done := make(chan struct{})
 	go func() {
 		wg.Wait()
@@ -308,12 +371,12 @@ func waitStop(wg *sync.WaitGroup, sig <-chan os.Signal) bool {
 	defer timer.Stop()
 	select {
 	case <-done:
-		return true
+		return false, false
 	case <-timer.C:
 		slog.Error("shutdown timed out")
-		return true
+		return true, false
 	case <-sig:
 		slog.Error("shutdown signal")
-		return false
+		return false, true
 	}
 }
