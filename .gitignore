@@ -9,3 +9,4 @@ ui/test-results
 /vibecollector-clients
 /vibecollector-config
 resume-grok-session.sh
+*.toml
