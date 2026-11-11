@@ -206,19 +206,27 @@ func TestPublicHost(t *testing.T) {
 		name   string
 		body   string
 		issuer string
+		base   string
 		want   error
 	}{
-		{"unspecified v4", "[http]\nlisten = \"0.0.0.0:8080\"\n", "", nil},
-		{"unspecified v6", "[http]\nlisten = \"[::]:8080\"\n", "", nil},
-		{"public host takes listen port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n", "http://10.1.0.232:8080", nil},
-		{"public host keeps its port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"collector.example:8443\"\n", "http://collector.example:8443", nil},
-		{"public ipv6", "[http]\nlisten = \"[::]:8080\"\npublic_host = \"[2001:db8::1]\"\n", "http://[2001:db8::1]:8080", nil},
-		{"specific listen", "[http]\nlisten = \"203.0.113.4:9\"\n", "http://203.0.113.4:9", nil},
-		{"explicit issuer wins", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n[oauth2]\nissuer = \"https://collector.example\"\n", "https://collector.example", nil},
-		{"wildcard public host", "[http]\npublic_host = \"0.0.0.0\"\n", "", ErrBadConfig},
-		{"wildcard public v6", "[http]\npublic_host = \"[::]\"\n", "", ErrBadConfig},
-		{"public host with scheme", "[http]\npublic_host = \"http://example.com\"\n", "", ErrBadConfig},
-		{"public host with path", "[http]\npublic_host = \"example.com/api\"\n", "", ErrBadConfig},
+		{"unspecified v4", "[http]\nlisten = \"0.0.0.0:8080\"\n", "", "/", nil},
+		{"unspecified v6", "[http]\nlisten = \"[::]:8080\"\n", "", "/", nil},
+		{"public host takes listen port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n", "http://10.1.0.232:8080", "/", nil},
+		{"public host keeps its port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"collector.example:8443\"\n", "http://collector.example:8443", "/", nil},
+		{"public ipv6", "[http]\nlisten = \"[::]:8080\"\npublic_host = \"[2001:db8::1]\"\n", "http://[2001:db8::1]:8080", "/", nil},
+		{"specific listen", "[http]\nlisten = \"203.0.113.4:9\"\n", "http://203.0.113.4:9", "/", nil},
+		{"explicit issuer wins", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n[oauth2]\nissuer = \"https://collector.example\"\n", "https://collector.example", "/", nil},
+		{"absolute url", "[http]\nlisten = \"127.0.0.1:8080\"\npublic_host = \"https://collector.example/app\"\n", "https://collector.example/app", "/app", nil},
+		{"absolute url trailing slash", "[http]\nlisten = \"127.0.0.1:8080\"\npublic_host = \"https://collector.example/app/\"\n", "https://collector.example/app", "/app", nil},
+		{"absolute origin", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"http://example.com\"\n", "http://example.com", "/", nil},
+		{"absolute url keeps explicit issuer", "[http]\nlisten = \"127.0.0.1:8080\"\npublic_host = \"https://collector.example/app\"\n[oauth2]\nissuer = \"https://collector.example\"\n", "https://collector.example", "/app", nil},
+		{"wildcard public host", "[http]\npublic_host = \"0.0.0.0\"\n", "", "", ErrBadConfig},
+		{"wildcard public v6", "[http]\npublic_host = \"[::]\"\n", "", "", ErrBadConfig},
+		{"wildcard in url", "[http]\npublic_host = \"http://0.0.0.0/app\"\n", "", "", ErrBadConfig},
+		{"public host with path", "[http]\npublic_host = \"example.com/api\"\n", "", "", ErrBadConfig},
+		{"public url query", "[http]\npublic_host = \"https://example.com/app?x=1\"\n", "", "", ErrBadConfig},
+		{"public url user", "[http]\npublic_host = \"https://user:pw@example.com/app\"\n", "", "", ErrBadConfig},
+		{"public url dotdot", "[http]\npublic_host = \"https://example.com/app/../x\"\n", "", "", ErrBadConfig},
 	}
 	for _, tc := range cases {
 		t.Run(tc.name, func(t *testing.T) {
@@ -235,6 +243,9 @@ func TestPublicHost(t *testing.T) {
 			}
 			if cfg.OAuth2.Issuer != tc.issuer {
 				t.Fatalf("issuer %q", cfg.OAuth2.Issuer)
+			}
+			if cfg.HTTP.BasePath != tc.base {
+				t.Fatalf("base %q", cfg.HTTP.BasePath)
 			}
 		})
 	}

@@ -518,7 +518,7 @@ func TestRewriteSpecUsesPublicOrigin(t *testing.T) {
 		"paths":   map[string]any{"/api/v1/health": map[string]any{}},
 		"servers": []any{map[string]any{"url": "http://127.0.0.1:8080"}},
 	}
-	if err := rewriteSpec(doc, "/api/v1", "http://10.1.0.232:8080"); err != nil {
+	if err := rewriteSpec(doc, "/api/v1", "http://10.1.0.232:8080", "/"); err != nil {
 		t.Fatal(err)
 	}
 	got, _ := doc["servers"].([]any)[0].(map[string]any)["url"].(string)
@@ -803,6 +803,105 @@ func TestStaticUINotGated(t *testing.T) {
 	spec := call(s, http.MethodGet, "/openapi.json", nil, nil)
 	if spec.Code != http.StatusOK || strings.Contains(spec.Body.String(), marker) || !strings.Contains(spec.Body.String(), "openapi") {
 		t.Fatalf("openapi %d %s", spec.Code, spec.Body.String())
+	}
+}
+
+func TestPublicBaseMount(t *testing.T) {
+	db := openDB(t)
+	q, err := store.NewQuery(db)
+	if err != nil {
+		t.Fatal(err)
+	}
+	ui := fstest.MapFS{
+		"index.html":    &fstest.MapFile{Data: []byte(`<script src="/assets/app.js"></script>`)},
+		"assets/app.js": &fstest.MapFile{Data: []byte("console.log(1)\n")},
+	}
+	s, err := NewServer(config.HTTP{
+		Listen:            "127.0.0.1:0",
+		APIPrefix:         "/api/v1",
+		BasePath:          "/app",
+		QueryCacheTTL:     time.Second,
+		QueryCacheEntries: 8,
+	}, config.OAuth2{
+		Issuer:   "https://collector.example/app",
+		TokenTTL: time.Hour,
+	}, q, db, obs.NewCounters(), ui)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := call(s, http.MethodGet, "/openapi.json", nil, nil); rr.Code != http.StatusNotFound {
+		t.Fatal(rr.Code)
+	}
+	if rr := call(s, http.MethodGet, "/api/v1/health", nil, nil); rr.Code != http.StatusNotFound {
+		t.Fatal(rr.Code)
+	}
+	if rr := call(s, http.MethodGet, "/flows", nil, nil); rr.Code != http.StatusNotFound {
+		t.Fatal(rr.Code)
+	}
+	root := call(s, http.MethodGet, "/app", nil, nil)
+	if root.Code != http.StatusFound || root.Header().Get("Location") != "/app/" {
+		t.Fatalf("redirect %d %s", root.Code, root.Header().Get("Location"))
+	}
+	spec := call(s, http.MethodGet, "/app/openapi.json", nil, nil)
+	if spec.Code != http.StatusOK {
+		t.Fatal(spec.Code, spec.Body.String())
+	}
+	doc := mustJSON(t, spec.Body.Bytes())
+	paths := doc["paths"].(map[string]any)
+	if _, ok := paths["/app/api/v1/health"]; !ok {
+		t.Fatal(paths)
+	}
+	if _, ok := paths["/app/oauth/authorize"]; !ok {
+		t.Fatal("oauth path", paths)
+	}
+	gotURL, _ := doc["servers"].([]any)[0].(map[string]any)["url"].(string)
+	if gotURL != "https://collector.example/app/api/v1" {
+		t.Fatal(gotURL)
+	}
+	if rr := call(s, http.MethodGet, "/app/api/v1/health", nil, nil); rr.Code != http.StatusUnauthorized {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	page := call(s, http.MethodGet, "/app/flows", nil, nil)
+	if page.Code != http.StatusOK || !strings.Contains(page.Body.String(), `src="assets/app.js"`) {
+		t.Fatal(page.Code, page.Body.String())
+	}
+	js := call(s, http.MethodGet, "/app/assets/app.js", nil, nil)
+	if js.Code != http.StatusOK || !strings.Contains(js.Body.String(), "console.log") {
+		t.Fatal(js.Code, js.Body.String())
+	}
+	challenge := pkceChallenge(t)
+	badReq := httptest.NewRequest(http.MethodGet, "/app/oauth/authorize?response_type=code&client_id=vibecollector-ui&redirect_uri="+url.QueryEscape("https://collector.example/callback")+"&code_challenge="+challenge+"&code_challenge_method=S256&scope=read", nil)
+	badReq.Host = "collector.example"
+	badReq.Header.Set("X-Forwarded-Proto", "https")
+	badRR := httptest.NewRecorder()
+	s.ServeHTTP(badRR, badReq)
+	if badRR.Code != http.StatusBadRequest {
+		t.Fatal(badRR.Code, badRR.Body.String())
+	}
+	req := httptest.NewRequest(http.MethodGet, "/app/oauth/authorize?response_type=code&client_id=vibecollector-ui&redirect_uri="+url.QueryEscape("https://collector.example/app/callback")+"&code_challenge="+challenge+"&code_challenge_method=S256&scope=read", nil)
+	req.Host = "collector.example"
+	req.Header.Set("X-Forwarded-Proto", "https")
+	rr := httptest.NewRecorder()
+	s.ServeHTTP(rr, req)
+	if rr.Code != http.StatusFound || !strings.Contains(rr.Header().Get("Location"), "https://collector.example/app/callback?") {
+		t.Fatal(rr.Code, rr.Header().Get("Location"), rr.Body.String())
+	}
+
+	alt, err := NewServer(config.HTTP{
+		Listen:            "127.0.0.1:0",
+		APIPrefix:         "/app/api/v1",
+		BasePath:          "/app",
+		QueryCacheTTL:     time.Second,
+		QueryCacheEntries: 8,
+	}, config.OAuth2{TokenTTL: time.Hour}, q, db, obs.NewCounters(), nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if rr := call(alt, http.MethodGet, "/app/api/v1/health", nil, nil); rr.Code != http.StatusUnauthorized {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if rr := call(alt, http.MethodGet, "/app/app/api/v1/health", nil, nil); rr.Code != http.StatusNotFound {
+		t.Fatal(rr.Code)
 	}
 }
 

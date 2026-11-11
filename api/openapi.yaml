@@ -14,8 +14,9 @@ info:
     The REST mount is `http.api_prefix`, default `/api/v1`.
     The nine data paths in this document use that default.
     When the daemon serves this document it rewrites those `/api/v1` path keys
-    to the configured prefix. `/oauth/authorize`, `/oauth/token`, and `/openapi.json`
-    stay at the site root.
+    to the configured prefix, under the path of `http.public_host`.
+    `/oauth/authorize`, `/oauth/token`, and `/openapi.json` are mounted on that
+    same path. An empty public path leaves them at the site root.
 
     Range routes take `start` and `end` (RFC 3339 UTC, half-open `[start, end)`)
     or `day=YYYY-MM-DD` with an IANA `tz` (default `UTC`).
@@ -34,10 +35,11 @@ servers:
   - url: http://127.0.0.1:8080
     description: |
       Daemon HTTP listener. REST routes are mounted at `http.api_prefix`
-      (default `/api/v1`). This document writes those paths at the default.
-      The served copy uses the configured prefix. When `http.public_host`
-      or `oauth2.issuer` names an origin, the served copy uses that origin.
-      OAuth2 and this document stay at the site root.
+      (default `/api/v1`) under the path of `http.public_host`.
+      This document writes those paths at the default, on the site root.
+      The served copy uses the configured prefix and public path.
+      When `http.public_host` or `oauth2.issuer` names an origin, the served
+      copy uses that origin. OAuth2 and this document use the same public path.
 tags:
   - name: status
     description: Process and exporter health. These routes do not take a time range.

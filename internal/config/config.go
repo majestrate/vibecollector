@@ -8,6 +8,7 @@ import (
 	"io"
 	"net"
 	"net/netip"
+	"net/url"
 	"os"
 	"sort"
 	"strconv"
@@ -30,8 +31,8 @@ var (
 	// a negative duration, db.raw_retention is under 1 minute,
 	// db.rollup_retention is under 1 hour, a queue depth is under 1,
 	// including an explicit zero, log.level is not debug, info, warn, or
-	// error, http.listen is not host:port, http.public_host is not a host
-	// or host:port, or http.api_prefix is not an absolute path.
+	// error, http.listen is not host:port, http.public_host is not a host,
+	// host:port, or absolute http(s) URL, or http.api_prefix is not an absolute path.
 	// errors.Is reports this sentinel.
 	ErrBadConfig = errors.New("invalid configuration")
 )
@@ -87,12 +88,15 @@ type UDP struct {
 }
 
 // HTTP is the API listener. Token is accepted and ignored. It is not the
-// API gate. Listen is the socket, host:port. PublicHost is the host clients
-// use to reach that socket. It is a hostname or host:port, with no scheme.
-// An empty PublicHost means a specific Listen address is the public host.
-// 0.0.0.0 and :: are bind addresses and are not a public host.
-// APIPrefix is the REST mount. An empty value means /api/v1.
-// QueryCacheTTL and QueryCacheEntries size the API response cache.
+// API gate. Listen is the socket, host:port. PublicHost is where clients
+// reach the daemon: a hostname, host:port, or an absolute http or https URL.
+// A path on that URL is the base every HTTP route is mounted under.
+// An empty PublicHost means a specific Listen address is the public host
+// and the base path is /. 0.0.0.0 and :: are bind addresses and are not a
+// public host. BasePath is that mount path, with no trailing slash, or /.
+// It is not a file key. APIPrefix is the REST mount under BasePath.
+// An empty value means /api/v1. QueryCacheTTL and QueryCacheEntries size
+// the API response cache.
 type HTTP struct {
 	Listen            string        `toml:"listen"`
 	PublicHost        string        `toml:"public_host"`
@@ -100,13 +104,15 @@ type HTTP struct {
 	APIPrefix         string        `toml:"api_prefix"`
 	QueryCacheTTL     time.Duration `toml:"query_cache_ttl"`
 	QueryCacheEntries int           `toml:"query_cache_entries"`
+	BasePath          string        `toml:"-"`
 }
 
 // OAuth2 is the daemon's own authorization server for this UI.
 // There is no external IdP. Issuer is an allowed origin for the
-// authorization redirect. When it is empty, Load sets it to http:// plus
-// http.public_host, or to http:// plus a specific http.listen. An
-// unspecified listen address does not become the issuer. The browser client
+// authorization redirect. When it is empty, Load sets it from http.public_host.
+// An absolute public URL keeps its scheme and path. A hostname or host:port
+// becomes http:// plus that host. An omitted port uses the listen port.
+// An unspecified listen address does not become the issuer. The browser client
 // id is the fixed public client vibecollector-ui and is not a config field. Confidential client
 // ids and secrets are rows in the database, managed outside this file.
 // TokenTTL is the access-token lifetime. RefreshTTL is the refresh-token
@@ -179,12 +185,14 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // Config.ReservedSeen ("geoip", "asn", "reputation", in that order) and does
 // not log. main logs "enrich.<name>: reserved table, ignored".
 // http.token is accepted and ignored. An empty token is not an error, on
-// loopback or any other listen address. http.public_host is the host
-// clients use. It is a hostname or host:port. An omitted port uses the
-// http.listen port. 0.0.0.0 and :: are rejected there. [oauth2] is a known
-// table. An empty issuer becomes http:// plus that public host when one is
-// known, after flag overrides. An unspecified http.listen with an empty
-// public_host leaves the issuer empty. token_ttl defaults to 1h, and
+// loopback or any other listen address. http.public_host is where clients
+// reach the daemon. A hostname or host:port uses http and, when the port is
+// omitted, the http.listen port. An absolute http or https URL keeps that
+// scheme, host, port, and path. The path is the base every HTTP route is
+// mounted under. 0.0.0.0 and :: are rejected. [oauth2] is a known table.
+// An empty issuer becomes that public URL when one is known, after flag
+// overrides. An unspecified http.listen with an empty public_host leaves
+// the issuer empty. token_ttl defaults to 1h, and
 // refresh_ttl defaults to 24h. refresh_ttl must be longer than token_ttl.
 // ui_client_id and client_secret are unknown keys.
 // http.api_prefix defaults to /api/v1 when omitted or empty.
@@ -192,7 +200,7 @@ func (t *ReservedTable) UnmarshalTOML([]byte) error { return nil }
 // non-string value, a negative duration, or an explicit zero on a retention
 // that has a minimum, a queue depth is less than 1, including an explicit
 // zero, log.level is not a known name, http.listen is not host:port,
-// http.public_host is not a host or host:port, or http.api_prefix is
+// http.public_host is not a host, host:port, or absolute http(s) URL, or http.api_prefix is
 // not an absolute path.
 // A missing default file is not an error. A missing file named by ConfigPath,
 // or a file that cannot be read, is returned unwrapped and is not one of the
@@ -212,7 +220,9 @@ func Load(flags Flags) (*Config, error) {
 	}
 	applyDefaults(cfg)
 	applyFlags(cfg, flags)
-	applyIssuer(cfg)
+	if err := applyPublic(cfg); err != nil {
+		return nil, err
+	}
 	if err := validate(cfg); err != nil {
 		return nil, err
 	}
@@ -559,46 +569,128 @@ func applyDefaults(c *Config) {
 	}
 }
 
-// applyIssuer fills an empty issuer from the public host. Flags have already
-// replaced http.listen. A specific listen address is that public host when
-// http.public_host is empty. 0.0.0.0 and :: are not copied into the issuer.
-// The scheme is http because the daemon does not terminate TLS.
-func applyIssuer(c *Config) {
-	if c.OAuth2.Issuer != "" {
-		return
+// applyPublic records the mount path and fills an empty issuer.
+// Flags have already replaced http.listen. An invalid public host is
+// ErrBadConfig. An invalid listen address is left for validate.
+func applyPublic(c *Config) error {
+	if _, port, err := net.SplitHostPort(c.HTTP.Listen); err != nil || port == "" {
+		c.HTTP.BasePath = "/"
+		return nil
 	}
-	host := resolvedPublicHost(c)
-	if host == "" {
-		return
+	base, issuer, err := parsePublicHost(c.HTTP.PublicHost, c.HTTP.Listen)
+	if err != nil {
+		return err
 	}
-	c.OAuth2.Issuer = "http://" + host
+	c.HTTP.BasePath = base
+	if c.OAuth2.Issuer == "" {
+		c.OAuth2.Issuer = issuer
+	}
+	return nil
 }
 
-// resolvedPublicHost is host:port clients use. An empty result means the
-// bind address is unspecified and http.public_host was not set.
-func resolvedPublicHost(c *Config) string {
-	_, listenPort, err := net.SplitHostPort(c.HTTP.Listen)
-	if err != nil || listenPort == "" {
-		return ""
+// parsePublicHost reads public against listen.
+// base is the mount path, "/" when public has no path.
+// issuer is the public origin, empty when the bind address is unspecified
+// and public is empty. An absolute URL keeps its scheme.
+func parsePublicHost(public, listen string) (base, issuer string, err error) {
+	if strings.Contains(public, "://") {
+		return parsePublicURL(public)
 	}
-	if c.HTTP.PublicHost != "" {
-		host, port, err := splitHostOptionalPort(c.HTTP.PublicHost)
-		if err != nil || host == "" {
-			return ""
+	if public == "" {
+		listenHost, _, splitErr := net.SplitHostPort(listen)
+		if splitErr != nil || unspecifiedHost(listenHost) {
+			return "/", "", nil
 		}
-		if port == "" {
-			port = listenPort
-		}
-		if strings.Contains(host, ":") {
-			return "[" + host + "]:" + port
-		}
-		return net.JoinHostPort(host, port)
+		return "/", "http://" + listen, nil
 	}
-	listenHost, _, err := net.SplitHostPort(c.HTTP.Listen)
-	if err != nil || unspecifiedHost(listenHost) {
-		return ""
+	if strings.ContainsAny(public, "/?#@ ") {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
 	}
-	return c.HTTP.Listen
+	host, port, err := splitHostOptionalPort(public)
+	if err != nil || host == "" || unspecifiedHost(host) {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	if port == "" {
+		_, listenPort, splitErr := net.SplitHostPort(listen)
+		if splitErr != nil || listenPort == "" {
+			return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+		}
+		port = listenPort
+	} else if err := checkPort(port); err != nil {
+		return "", "", err
+	}
+	var hostport string
+	if strings.Contains(host, ":") {
+		hostport = "[" + host + "]:" + port
+	} else {
+		hostport = net.JoinHostPort(host, port)
+	}
+	return "/", "http://" + hostport, nil
+}
+
+// parsePublicURL accepts http or https with an optional path.
+// The path is the mount base. Query, fragment, userinfo, and .. are rejected.
+func parsePublicURL(public string) (base, issuer string, err error) {
+	if strings.ContainsAny(public, " ") {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	u, err := url.Parse(public)
+	if err != nil || u.Host == "" || u.User != nil || u.RawQuery != "" || u.Fragment != "" || u.Opaque != "" {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	if u.Scheme != "http" && u.Scheme != "https" {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	host := u.Hostname()
+	if host == "" || unspecifiedHost(host) {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	if p := u.Port(); p != "" {
+		if err := checkPort(p); err != nil {
+			return "", "", err
+		}
+	}
+	if strings.Contains(u.Path, "..") || strings.Contains(u.EscapedPath(), "..") || strings.Contains(u.Path, "//") {
+		return "", "", fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	base = "/"
+	if u.Path != "" && u.Path != "/" {
+		base = strings.TrimRight(u.Path, "/")
+		if err := validateBasePath(base); err != nil {
+			return "", "", err
+		}
+	}
+	u.RawQuery = ""
+	u.Fragment = ""
+	u.RawPath = ""
+	u.Path = ""
+	if base != "/" {
+		u.Path = base
+	}
+	return base, u.String(), nil
+}
+
+func checkPort(port string) error {
+	n, err := strconv.Atoi(port)
+	if err != nil || n < 1 || n > 65535 {
+		return fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	return nil
+}
+
+func validateBasePath(p string) error {
+	if len(p) < 2 || p[0] != '/' || strings.ContainsAny(p, "?#") {
+		return fmt.Errorf("%w: http.public_host", ErrBadConfig)
+	}
+	for i, seg := range strings.Split(p, "/") {
+		if i == 0 {
+			continue
+		}
+		if seg == "" || seg == "." || seg == ".." {
+			return fmt.Errorf("%w: http.public_host", ErrBadConfig)
+		}
+	}
+	return nil
 }
 
 func splitHostOptionalPort(s string) (string, string, error) {
@@ -705,21 +797,8 @@ func validatePublicHost(public string) error {
 	if public == "" {
 		return nil
 	}
-	if strings.Contains(public, "://") || strings.ContainsAny(public, "/?#@ ") {
-		return fmt.Errorf("%w: http.public_host", ErrBadConfig)
-	}
-	host, port, err := splitHostOptionalPort(public)
-	if err != nil || host == "" || unspecifiedHost(host) {
-		return fmt.Errorf("%w: http.public_host", ErrBadConfig)
-	}
-	if port == "" {
-		return nil
-	}
-	n, err := strconv.Atoi(port)
-	if err != nil || n < 1 || n > 65535 {
-		return fmt.Errorf("%w: http.public_host", ErrBadConfig)
-	}
-	return nil
+	_, _, err := parsePublicHost(public, "127.0.0.1:9")
+	return err
 }
 
 func validatePrefix(p string) error {

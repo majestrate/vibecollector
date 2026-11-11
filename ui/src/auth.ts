@@ -1,3 +1,4 @@
+import { appPath, rooted } from "./base";
 import { clearSession, clientCreds, refreshToken, rememberSession } from "./session";
 import { bytesToBase64Url, sha256 } from "./sha256";
 
@@ -33,7 +34,7 @@ export class NeedsLogin extends Error {
  * The result is an absolute URL with no fragment. It throws when window is missing.
  */
 export function redirectURI(): string {
-  return window.location.origin + REDIRECT_PATH;
+  return window.location.origin + rooted(REDIRECT_PATH);
 }
 
 /**
@@ -42,8 +43,9 @@ export function redirectURI(): string {
  */
 export function rememberReturn(): void {
   if (typeof window === "undefined") return;
-  if (window.location.pathname === REDIRECT_PATH || window.location.pathname === CREDENTIALS_PATH) return;
-  const path = window.location.pathname + window.location.search;
+  const here = appPath(window.location.pathname);
+  if (here === REDIRECT_PATH || here === CREDENTIALS_PATH) return;
+  const path = here + window.location.search;
   if (!path.startsWith("/") || path.startsWith("//")) return;
   sessionStorage.setItem(RETURN_KEY, path);
 }
@@ -56,7 +58,7 @@ export function rememberReturn(): void {
 export function peekReturnSearch(): string {
   if (typeof window === "undefined") return "";
   try {
-    if (window.location.pathname === REDIRECT_PATH) {
+    if (appPath(window.location.pathname) === REDIRECT_PATH) {
       const stored = sessionStorage.getItem(RETURN_KEY) ?? "";
       const q = stored.indexOf("?");
       return q >= 0 ? stored.slice(q) : "";
@@ -138,8 +140,8 @@ export function clearAuthError(): void {
 export function openCredentials(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
   rememberReturn();
-  if (window.location.pathname !== CREDENTIALS_PATH) {
-    window.location.assign(CREDENTIALS_PATH);
+  if (appPath(window.location.pathname) !== CREDENTIALS_PATH) {
+    window.location.assign(rooted(CREDENTIALS_PATH));
   }
   return Promise.resolve();
 }
@@ -197,8 +199,8 @@ async function runLogin(): Promise<void> {
   const creds = clientCreds();
   rememberReturn();
   if (!creds) {
-    if (window.location.pathname !== CREDENTIALS_PATH) {
-      window.location.assign(CREDENTIALS_PATH);
+    if (appPath(window.location.pathname) !== CREDENTIALS_PATH) {
+      window.location.assign(rooted(CREDENTIALS_PATH));
     }
     return;
   }
@@ -216,7 +218,7 @@ async function runLogin(): Promise<void> {
     code_challenge_method: "S256",
     state,
   });
-  window.location.assign("/oauth/authorize?" + q.toString());
+  window.location.assign(rooted("/oauth/authorize") + "?" + q.toString());
 }
 
 async function runExchange(search: string): Promise<void> {
@@ -340,7 +342,7 @@ async function runRefresh(): Promise<void> {
 }
 
 async function postToken(form: URLSearchParams): Promise<Response> {
-  return fetch("/oauth/token", {
+  return fetch(rooted("/oauth/token"), {
     method: "POST",
     credentials: "same-origin",
     headers: {

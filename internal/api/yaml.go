@@ -564,24 +564,28 @@ func (p *fp) plain() any {
 	return classifyPlain(strings.TrimSpace(p.s[start:p.i]))
 }
 
-// rewriteSpec points data paths and the server URL at prefix.
+// rewriteSpec points every path and the server URL at the mounted routes.
+// prefix is http.api_prefix. base is the public URL path, or / at the site root.
+// Data paths move from /api/v1 to prefix, then under base.
+// /oauth/authorize, /oauth/token, and /openapi.json move under base.
 // issuer, when it is an absolute origin, replaces the server host.
-// An empty issuer leaves the host from the document.
-// /oauth/authorize, /oauth/token, and /openapi.json stay at the site root.
-func rewriteSpec(doc map[string]any, prefix, issuer string) error {
+// The server path is the mounted API prefix. An empty issuer leaves the document host.
+func rewriteSpec(doc map[string]any, prefix, issuer, base string) error {
 	paths, ok := doc["paths"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("openapi: paths")
 	}
+	mountedAPI := mountPath(base, prefix)
 	next := make(map[string]any, len(paths))
 	for k, v := range paths {
 		nk := k
 		if k == "/api/v1" || strings.HasPrefix(k, "/api/v1/") {
 			nk = prefix + strings.TrimPrefix(k, "/api/v1")
 		}
-		next[nk] = v
+		next[mountPath(base, nk)] = v
 	}
 	doc["paths"] = next
+	rewriteFlowURLs(doc, base)
 	servers, ok := doc["servers"].([]any)
 	if !ok {
 		return fmt.Errorf("openapi: servers")
@@ -592,14 +596,85 @@ func rewriteSpec(doc map[string]any, prefix, issuer string) error {
 			return fmt.Errorf("openapi: server")
 		}
 		raw, _ := m["url"].(string)
-		m["url"] = joinServerURL(raw, prefix, issuer)
+		m["url"] = joinServerURL(raw, mountedAPI, issuer)
 	}
 	return nil
+}
+
+// mountPath joins base and p. A base of "" or / leaves p unchanged.
+// p that already starts with base is left unchanged.
+func mountPath(base, p string) string {
+	if base == "" || base == "/" {
+		if p == "" {
+			return "/"
+		}
+		return p
+	}
+	if p == base || strings.HasPrefix(p, base+"/") {
+		return p
+	}
+	if p == "" || p == "/" {
+		return base + "/"
+	}
+	return base + p
+}
+
+// relativePath is p with base removed. The mux sees this path after ServeHTTP strips base.
+func relativePath(base, p string) string {
+	if base == "" || base == "/" {
+		return p
+	}
+	if p == base {
+		return "/"
+	}
+	if strings.HasPrefix(p, base+"/") {
+		return strings.TrimPrefix(p, base)
+	}
+	return p
+}
+
+func underBase(path, base string) bool {
+	if base == "" || base == "/" {
+		return true
+	}
+	if path == "" {
+		path = "/"
+	}
+	return path == base || strings.HasPrefix(path, base+"/")
+}
+
+func rewriteFlowURLs(doc map[string]any, base string) {
+	comps, _ := doc["components"].(map[string]any)
+	if comps == nil {
+		return
+	}
+	schemes, _ := comps["securitySchemes"].(map[string]any)
+	if schemes == nil {
+		return
+	}
+	oauth, _ := schemes["oauth2"].(map[string]any)
+	if oauth == nil {
+		return
+	}
+	flows, _ := oauth["flows"].(map[string]any)
+	for _, flow := range flows {
+		m, ok := flow.(map[string]any)
+		if !ok {
+			continue
+		}
+		for _, key := range []string{"authorizationUrl", "tokenUrl", "refreshUrl"} {
+			s, _ := m[key].(string)
+			if strings.HasPrefix(s, "/") {
+				m[key] = mountPath(base, s)
+			}
+		}
+	}
 }
 
 func joinServerURL(raw, prefix, issuer string) string {
 	if iu, err := url.Parse(issuer); err == nil && iu.Scheme != "" && iu.Host != "" {
 		iu.Path = prefix
+		iu.RawPath = ""
 		iu.RawQuery = ""
 		iu.Fragment = ""
 		iu.User = nil
@@ -610,6 +685,7 @@ func joinServerURL(raw, prefix, issuer string) string {
 		return strings.TrimRight(raw, "/") + prefix
 	}
 	u.Path = prefix
+	u.RawPath = ""
 	u.RawQuery = ""
 	u.Fragment = ""
 	return u.String()

@@ -1,6 +1,7 @@
 package api
 
 import (
+	"bytes"
 	"context"
 	"crypto/rand"
 	"crypto/sha256"
@@ -58,10 +59,12 @@ var errBadRange = errors.New("bad_range")
 // GET /oauth/authorize without code_challenge still mints a verifier, stores it in an
 // HttpOnly cookie, and redirects with the code. That path is the public client.
 // client_credentials accepts any client id and secret stored in clients.
-// GET /openapi.json, GET /oauth/authorize, and POST /oauth/token stay at
-// the site root and are not token-gated. Static files from ui are not gated.
+// GET {base}/openapi.json, GET {base}/oauth/authorize, and POST {base}/oauth/token
+// are not token-gated. base is http.public_host's path, or / when that path is empty.
+// Static files from ui are not gated. Every route is under base.
 type Server struct {
 	listen   string
+	base     string
 	prefix   string
 	oauth    config.OAuth2
 	q        *store.Query
@@ -87,7 +90,8 @@ type authCode struct {
 }
 
 // NewServer builds the routes, the query cache, and the served OpenAPI document.
-// cfg.APIPrefix empty means /api/v1. oauth is the in-process authorization server.
+// cfg.APIPrefix empty means /api/v1. cfg.BasePath empty means /.
+// Every route is mounted under BasePath. oauth is the in-process authorization server.
 // q, clients, and counters are required; a nil returns ErrNilDep. clients is the
 // credential directory for client_credentials. ui is the static tree.
 // A nil ui serves no files. A non-positive query-cache TTL or entry cap returns ErrBadCap.
@@ -106,6 +110,12 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, clients *st
 	if prefix == "" {
 		prefix = "/api/v1"
 	}
+	base := cfg.BasePath
+	if base == "" {
+		base = "/"
+	}
+	publicPrefix := mountPath(base, prefix)
+	innerPrefix := relativePath(base, publicPrefix)
 	cache, err := NewQueryCache(cfg.QueryCacheTTL, cfg.QueryCacheEntries)
 	if err != nil {
 		return nil, err
@@ -114,7 +124,7 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, clients *st
 	if err != nil {
 		return nil, err
 	}
-	if err := rewriteSpec(doc, prefix, oauth.Issuer); err != nil {
+	if err := rewriteSpec(doc, prefix, oauth.Issuer, base); err != nil {
 		return nil, err
 	}
 	spec, err := json.Marshal(doc)
@@ -123,7 +133,8 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, clients *st
 	}
 	s := &Server{
 		listen:   cfg.Listen,
-		prefix:   prefix,
+		base:     base,
+		prefix:   innerPrefix,
 		oauth:    oauth,
 		q:        q,
 		clients:  clients,
@@ -171,25 +182,40 @@ func (s *Server) uiHandler() http.Handler {
 			return
 		}
 		name := strings.TrimPrefix(p, "/")
-		if name != "" && name != "." {
-			f, err := s.ui.Open(name)
-			if err != nil {
-				if strings.Contains(path.Base(name), ".") {
-					http.NotFound(w, r)
-					return
-				}
-				r2 := r.Clone(r.Context())
-				u := *r.URL
-				u.Path = "/"
-				u.RawPath = ""
-				r2.URL = &u
-				files.ServeHTTP(w, r2)
+		if name == "" || name == "." {
+			s.serveIndex(w, r)
+			return
+		}
+		f, err := s.ui.Open(name)
+		if err != nil {
+			if strings.Contains(path.Base(name), ".") {
+				http.NotFound(w, r)
 				return
 			}
-			_ = f.Close()
+			s.serveIndex(w, r)
+			return
 		}
+		_ = f.Close()
 		files.ServeHTTP(w, r)
 	})
+}
+
+// serveIndex writes index.html with asset URLs relative to the document.
+// The browser resolves assets/ against window.location, so a page at
+// {base}/flows loads {base}/assets. A head request writes no body.
+func (s *Server) serveIndex(w http.ResponseWriter, r *http.Request) {
+	b, err := fs.ReadFile(s.ui, "index.html")
+	if err != nil {
+		http.NotFound(w, r)
+		return
+	}
+	b = bytes.ReplaceAll(b, []byte(`="/assets/`), []byte(`="assets/`))
+	w.Header().Set("Content-Type", "text/html; charset=utf-8")
+	w.WriteHeader(http.StatusOK)
+	if r.Method == http.MethodHead {
+		return
+	}
+	_, _ = w.Write(b)
 }
 
 // ListenAndServe binds cfg.Listen and serves until ctx is canceled.
@@ -225,9 +251,34 @@ func (s *Server) ListenAndServe(ctx context.Context) error {
 }
 
 // ServeHTTP sets the response policy and dispatches. CORS is off.
+// When base is not /, a request outside that path is 404.
+// A request for the base itself redirects to base + "/".
+// The remaining path is what the routes are registered on.
 func (s *Server) ServeHTTP(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Referrer-Policy", "no-referrer")
 	w.Header().Set("Content-Security-Policy", csp)
+	if s.base != "" && s.base != "/" {
+		p := r.URL.Path
+		if p == s.base {
+			dest := s.base + "/"
+			if r.URL.RawQuery != "" {
+				dest += "?" + r.URL.RawQuery
+			}
+			http.Redirect(w, r, dest, http.StatusFound)
+			return
+		}
+		if !strings.HasPrefix(p, s.base+"/") {
+			http.NotFound(w, r)
+			return
+		}
+		r2 := r.Clone(r.Context())
+		u := *r.URL
+		u.Path = strings.TrimPrefix(p, s.base)
+		u.RawPath = ""
+		r2.URL = &u
+		s.mux.ServeHTTP(w, r2)
+		return
+	}
 	s.mux.ServeHTTP(w, r)
 }
 
@@ -386,7 +437,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	redir := q.Get("redirect_uri")
-	if !sameOrigin(r, redir, s.oauth.Issuer) {
+	if !sameOrigin(r, redir, s.oauth.Issuer, s.base) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -446,7 +497,7 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
 	if minted {
-		setPKCECookies(w, verifier, state)
+		setPKCECookies(w, verifier, state, mountPath(s.base, "/oauth/token"))
 	}
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
@@ -484,7 +535,7 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 			oauthErr(w, http.StatusBadRequest, "invalid_request")
 			return
 		}
-		clearPKCECookies(w)
+		clearPKCECookies(w, mountPath(s.base, "/oauth/token"))
 		if stErr != nil || st.Value == "" || r.PostForm.Get("state") == "" || subtle.ConstantTimeCompare([]byte(st.Value), []byte(r.PostForm.Get("state"))) != 1 {
 			oauthErr(w, http.StatusBadRequest, "invalid_grant")
 			return
@@ -620,21 +671,21 @@ func newPKCE() (verifier, challenge string, err error) {
 	return verifier, challenge, nil
 }
 
-func setPKCECookies(w http.ResponseWriter, verifier, state string) {
-	http.SetCookie(w, pkceCookieValue(pkceCookie, verifier, 600))
-	http.SetCookie(w, pkceCookieValue(stateCookie, state, 600))
+func setPKCECookies(w http.ResponseWriter, verifier, state, cookiePath string) {
+	http.SetCookie(w, pkceCookieValue(pkceCookie, verifier, 600, cookiePath))
+	http.SetCookie(w, pkceCookieValue(stateCookie, state, 600, cookiePath))
 }
 
-func clearPKCECookies(w http.ResponseWriter) {
-	http.SetCookie(w, pkceCookieValue(pkceCookie, "", -1))
-	http.SetCookie(w, pkceCookieValue(stateCookie, "", -1))
+func clearPKCECookies(w http.ResponseWriter, cookiePath string) {
+	http.SetCookie(w, pkceCookieValue(pkceCookie, "", -1, cookiePath))
+	http.SetCookie(w, pkceCookieValue(stateCookie, "", -1, cookiePath))
 }
 
-func pkceCookieValue(name, value string, maxAge int) *http.Cookie {
+func pkceCookieValue(name, value string, maxAge int, cookiePath string) *http.Cookie {
 	return &http.Cookie{
 		Name:     name,
 		Value:    value,
-		Path:     "/oauth/token",
+		Path:     cookiePath,
 		MaxAge:   maxAge,
 		HttpOnly: true,
 		SameSite: http.SameSiteLaxMode,
@@ -650,15 +701,19 @@ func pkceOK(verifier, challenge string) bool {
 }
 
 // sameOrigin accepts an absolute http or https redirect with no userinfo and
-// no fragment. The origin may be the configured issuer, or the request host.
+// no fragment. The path must sit under base when base is not /.
+// The origin may be the configured issuer, or the request host.
 // ListenAndServe does not set r.TLS. The scheme is X-Forwarded-Proto when
 // that header is http or https, and http otherwise. X-Forwarded-Host is ignored.
-func sameOrigin(r *http.Request, redirect, issuer string) bool {
+func sameOrigin(r *http.Request, redirect, issuer, base string) bool {
 	u, err := url.Parse(redirect)
 	if err != nil || !u.IsAbs() || u.Host == "" || u.User != nil || u.Fragment != "" {
 		return false
 	}
 	if u.Scheme != "http" && u.Scheme != "https" {
+		return false
+	}
+	if !underBase(u.Path, base) {
 		return false
 	}
 	if issuer != "" {

@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement } from "react";
 import { useLocation, useNavigate } from "react-router-dom";
 import { prefixFromSpec } from "./api";
+import { rooted } from "./base";
 import { finishCallback, setAuthError, startLogin, rememberReturn } from "./auth";
 import { CredentialsForm } from "./credentials";
 import { accessToken, clientCreds, hasAPIPrefix, setAPIPrefix } from "./session";
@@ -28,7 +29,7 @@ export function App(): ReactElement {
     (async () => {
       try {
         if (!hasAPIPrefix()) {
-          const res = await fetch("/openapi.json", { headers: { Accept: "application/json" } });
+          const res = await fetch(rooted("/openapi.json"), { headers: { Accept: "application/json" } });
           if (cancel) return;
           if (!res.ok) throw new Error("The API document is unavailable.");
           const spec: unknown = await res.json();
@@ -36,8 +37,8 @@ export function App(): ReactElement {
           setAPIPrefix(prefixFromSpec(spec));
         }
         if (cancel) return;
-        const path = window.location.pathname;
-        const params = new URLSearchParams(window.location.search);
+        const path = location.pathname;
+        const params = new URLSearchParams(location.search);
         if (path === "/credentials") {
           setError(null);
           setReady(true);
@@ -49,7 +50,7 @@ export function App(): ReactElement {
             navRef.current("/credentials", { replace: true });
             return;
           }
-          const went = await finishCallback(window.location.search, () => cancel, (next) => {
+          const went = await finishCallback(location.search, () => cancel, (next) => {
             navRef.current(next, { replace: true });
           });
           if (went && !cancel) setReady(true);
@@ -71,7 +72,7 @@ export function App(): ReactElement {
       } catch (err) {
         if (cancel) return;
         const message = err instanceof Error ? err.message : "Sign-in failed.";
-        if (window.location.pathname === "/credentials") return;
+        if (location.pathname === "/credentials") return;
         if (message === "The API document is unavailable." || message.startsWith("openapi:")) {
           setError(message);
           return;

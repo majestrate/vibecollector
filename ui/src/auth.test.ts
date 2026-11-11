@@ -60,6 +60,31 @@ test("sign-in builds an S256 challenge and keeps the secret off the authorize UR
   expect(assigned).not.toContain("s3cret");
 });
 
+test("sign-in uses the directory the page is mounted in", async () => {
+  storage();
+  saveClientCreds("probe", "s3cret");
+  const realRandom = crypto.getRandomValues.bind(crypto);
+  vi.stubGlobal("crypto", {
+    getRandomValues: realRandom,
+    subtle: { digest: () => Promise.reject(new Error("insecure")) },
+  });
+  let assigned = "";
+  vi.stubGlobal("window", {
+    location: {
+      pathname: "/app/flows",
+      search: "",
+      origin: "https://collector.example",
+      assign: (url: string) => {
+        assigned = url;
+      },
+    },
+  });
+  await startLogin();
+  const u = new URL(assigned, "https://collector.example");
+  expect(u.pathname).toBe("/app/oauth/authorize");
+  expect(u.searchParams.get("redirect_uri")).toBe("https://collector.example/app/callback");
+});
+
 test("a tab with no client pair opens the credentials form", async () => {
   const mem = storage();
   let assigned = "";
