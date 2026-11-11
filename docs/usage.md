@@ -74,7 +74,11 @@ Then after the configuration looks fine (defaults work out of the box) run:
 
 Add an initial oauth user:
 
-    $ ./bin/vibecollector-manage add -config -id username -secret password
+    $ ./bin/vibecollector-manage add -id username -secret password
+
+You can generate a random user credential by running:
+
+    $ ./bin/vibecollector-manage add -gen-id -gen-secret
 
 The web ui is at http://127.0.0.1:8080/
 
