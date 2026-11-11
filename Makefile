@@ -4,9 +4,9 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 DESTDIR ?=
 
-
-
 OUTBINS := out/vibecollector out/vibecollector-manage out/vibecollector-genconf
+
+build: compile
 
 build-ui:
 	rm -fv ui/embed_dist.go
@@ -31,6 +31,7 @@ build-bins: $(OUTBINS)
 
 compile: build-ui build-bins
 	@echo built
+
 
 test:
 	CGO_ENABLED=0 go test ./...
