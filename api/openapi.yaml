@@ -790,6 +790,15 @@ paths:
         `grant_type` is `authorization_code`, `refresh_token`, or `client_credentials`.
         The body is `application/x-www-form-urlencoded`, not JSON.
 
+        A confidential client authenticates with HTTP Basic, as required by RFC 6749.
+        The username is `client_id` and the password is `client_secret`.
+        Each is `application/x-www-form-urlencoded` before the pair is joined with
+        `:` and base64-encoded. When Basic carries the pair, those form fields
+        may be omitted. The form fields are still accepted. The same pair in both
+        places is one authentication. Different values are `invalid_request`.
+        A failed attempt that used the `Authorization` header is 401 `invalid_client`
+        and includes `WWW-Authenticate: Basic`.
+
         `authorization_code` requires `code`, `redirect_uri`, and `client_id`.
         When the client sent `code_challenge`, it also sends `code_verifier`.
         The web UI also sends `client_secret` for its registered client.
@@ -801,7 +810,7 @@ paths:
         new refresh token. The previous refresh token is spent.
         Presenting a spent refresh token revokes that session.
         `client_credentials` requires `client_id` and `client_secret` for a pair
-        stored in the database. It does not return a refresh token.
+        stored in the database, in Basic or in the form body. It does not return a refresh token.
         Those pairs are not config values.
         Optional `scope` is `read`.
 
@@ -2077,12 +2086,14 @@ components:
             Required when `grant_type` is `authorization_code`.
         client_id:
           type: string
-          description: Client identifier. Required for every grant.
+          description: |
+            Client identifier. Required for every grant unless HTTP Basic carries it.
         client_secret:
           type: string
           description: |
-            Client secret. Required when `grant_type` is `client_credentials`.
-            It must match a pair stored in the database. The config file does not hold it.
+            Client secret. Required when `grant_type` is `client_credentials`, and for a
+            registered client on the other grants. Send it in this field or as the HTTP Basic
+            password. It must match a pair stored in the database. The config file does not hold it.
         state:
           type: string
           description: |

@@ -1,4 +1,4 @@
-.PHONY: build test
+.PHONY: clean build test
 
 build:
 	pnpm --dir ui install --frozen-lockfile

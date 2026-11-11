@@ -377,6 +377,150 @@ func clientCall(t *testing.T, s *Server, id, secret string) *httptest.ResponseRe
 	})
 }
 
+func TestClientBasicAuth(t *testing.T) {
+	s, db := newAPI(t, "/api/v1", "")
+	ctx := context.Background()
+	if _, err := db.PutOAuthClient(ctx, "alpha", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PutOAuthClient(ctx, "spaced", "sec ret+x"); err != nil {
+		t.Fatal(err)
+	}
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("scope", "read")
+	rr := call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "one"),
+	})
+	if rr.Code != http.StatusOK || strings.Contains(rr.Body.String(), "refresh_token") || tokenOf(t, rr.Body.Bytes()) == "" {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal(rr.Header().Get("WWW-Authenticate"))
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeader("spaced", "sec ret+x"),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal("encoded secret", rr.Code, rr.Body.String())
+	}
+	space := url.Values{}
+	space.Set("grant_type", "client_credentials")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(space.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": "Basic " + base64.StdEncoding.EncodeToString([]byte("spaced:sec%20ret%2Bx")),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal("percent-encoded secret", rr.Code, rr.Body.String())
+	}
+	bad := url.Values{}
+	bad.Set("grant_type", "client_credentials")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(bad.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "two"),
+	})
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "invalid_client") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("WWW-Authenticate") != basicChallenge {
+		t.Fatal(rr.Header().Get("WWW-Authenticate"))
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(bad.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": "Basic !!!",
+	})
+	if rr.Code != http.StatusUnauthorized || rr.Header().Get("WWW-Authenticate") != basicChallenge {
+		t.Fatal("malformed", rr.Code, rr.Header().Get("WWW-Authenticate"), rr.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(bad.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": "Bearer nope",
+	})
+	if rr.Code != http.StatusUnauthorized || rr.Header().Get("WWW-Authenticate") != basicChallenge {
+		t.Fatal("bearer", rr.Code, rr.Body.String())
+	}
+	both := url.Values{}
+	both.Set("grant_type", "client_credentials")
+	both.Set("client_id", "alpha")
+	both.Set("client_secret", "two")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(both.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "one"),
+	})
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("mismatch", rr.Code, rr.Body.String())
+	}
+	if rr.Header().Get("WWW-Authenticate") != "" {
+		t.Fatal("mismatch challenge", rr.Header().Get("WWW-Authenticate"))
+	}
+	same := url.Values{}
+	same.Set("grant_type", "client_credentials")
+	same.Set("client_id", "alpha")
+	same.Set("client_secret", "one")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(same.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "one"),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal("same pair", rr.Code, rr.Body.String())
+	}
+
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	verifier := base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "alpha")
+	q.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(sum[:]))
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", "st")
+	rr = call(s, http.MethodGet, "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	redeem := url.Values{}
+	redeem.Set("grant_type", "authorization_code")
+	redeem.Set("code", loc.Query().Get("code"))
+	redeem.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	redeem.Set("code_verifier", verifier)
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(redeem.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "one"),
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal("code grant", rr.Code, rr.Body.String())
+	}
+	refresh := refreshOf(t, rr.Body.Bytes())
+	again := url.Values{}
+	again.Set("grant_type", "refresh_token")
+	again.Set("refresh_token", refresh)
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(again.Encode()), map[string]string{
+		"Content-Type":  "application/x-www-form-urlencoded",
+		"Authorization": basicHeaderRaw("alpha", "one"),
+	})
+	if rr.Code != http.StatusOK || tokenOf(t, rr.Body.Bytes()) == "" {
+		t.Fatal("refresh", rr.Code, rr.Body.String())
+	}
+}
+
+func basicHeader(id, secret string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(url.QueryEscape(id)+":"+url.QueryEscape(secret)))
+}
+
+func basicHeaderRaw(id, secret string) string {
+	return "Basic " + base64.StdEncoding.EncodeToString([]byte(id+":"+secret))
+}
+
 func TestClientCredentialsEmptySecret(t *testing.T) {
 	s, _ := newAPI(t, "/api/v1", "")
 	body := url.Values{}

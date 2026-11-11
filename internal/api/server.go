@@ -39,6 +39,10 @@ const queryTimeout = 5 * time.Second
 // on the token request. Confidential clients are rows in oauth_client.
 const uiClientID = "vibecollector-ui"
 
+// basicChallenge is the WWW-Authenticate value on a failed Authorization attempt.
+// RFC 6749 requires that header, and HTTP Basic is the scheme this endpoint supports.
+const basicChallenge = `Basic realm="vibecollector"`
+
 // pkceCookie and stateCookie carry the daemon-minted PKCE verifier and state.
 // They are HttpOnly, so the page cannot read them. Path limits them to the token route.
 const (
@@ -502,6 +506,9 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
+// handleToken redeems an authorization code, a refresh token, or client credentials.
+// A confidential client authenticates with HTTP Basic or with client_id and
+// client_secret in the form body.
 func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	if err := r.ParseForm(); err != nil {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
@@ -519,8 +526,107 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 	}
 }
 
+// parseClientAuth reads the client id and secret on a token request.
+// r.PostForm is already parsed. id and secret are the pair to check.
+// viaHeader is true when the client sent an Authorization header, so a 401
+// must include WWW-Authenticate. status is non-zero when that header or the
+// two methods cannot be used. code is the OAuth error for that status.
+//
+// HTTP Basic is the method RFC 6749 section 2.3.1 requires. The username and
+// password are application/x-www-form-urlencoded, then base64 of
+// username + ":" + password. The form fields are the other method. The same
+// pair in both is accepted. Different values are invalid_request. A Basic
+// header that does not decode, or an Authorization scheme other than Basic,
+// is invalid_client.
+func parseClientAuth(r *http.Request) (id, secret string, viaHeader bool, status int, code string) {
+	if len(r.PostForm["client_id"]) > 1 || len(r.PostForm["client_secret"]) > 1 {
+		return "", "", false, http.StatusBadRequest, "invalid_request"
+	}
+	bodyID := r.PostForm.Get("client_id")
+	bodySecret := r.PostForm.Get("client_secret")
+	header := strings.TrimSpace(r.Header.Get("Authorization"))
+	if header == "" {
+		return bodyID, bodySecret, false, 0, ""
+	}
+	scheme, param, _ := strings.Cut(header, " ")
+	scheme = strings.TrimSpace(scheme)
+	param = strings.TrimSpace(param)
+	if !strings.EqualFold(scheme, "Basic") {
+		return "", "", true, http.StatusUnauthorized, "invalid_client"
+	}
+	user, pass, ok := decodeBasicPair(param)
+	if !ok || user == "" {
+		return "", "", true, http.StatusUnauthorized, "invalid_client"
+	}
+	if (bodyID != "" && bodyID != user) || (bodySecret != "" && bodySecret != pass) {
+		return "", "", false, http.StatusBadRequest, "invalid_request"
+	}
+	return user, pass, true, 0, ""
+}
+
+// decodeBasicPair decodes one HTTP Basic parameter.
+// param is the base64 token after the scheme. user and pass are form-decoded.
+// ok is false when the token is not base64 or has no colon.
+func decodeBasicPair(param string) (user, pass string, ok bool) {
+	if param == "" {
+		return "", "", false
+	}
+	raw, err := base64.StdEncoding.DecodeString(param)
+	if err != nil {
+		raw, err = base64.RawStdEncoding.DecodeString(param)
+		if err != nil {
+			return "", "", false
+		}
+	}
+	user, pass, ok = strings.Cut(string(raw), ":")
+	if !ok {
+		return "", "", false
+	}
+	user, err = url.QueryUnescape(user)
+	if err != nil {
+		return "", "", false
+	}
+	pass, err = url.QueryUnescape(pass)
+	if err != nil {
+		return "", "", false
+	}
+	return user, pass, true
+}
+
+// writeClientAuthResult sends an OAuth error for a rejected client authentication.
+// viaHeader sets the Basic challenge on a 401. status is the HTTP status.
+// code is the OAuth error string.
+func writeClientAuthResult(w http.ResponseWriter, viaHeader bool, status int, code string) {
+	if viaHeader && status == http.StatusUnauthorized {
+		w.Header().Set("WWW-Authenticate", basicChallenge)
+	}
+	oauthErr(w, status, code)
+}
+
+// clientSecretOK reports whether id and secret match a stored pair.
+// It writes the OAuth error and returns false when the pair is rejected or
+// the database fails. viaHeader adds the Basic challenge to that 401.
+// The caller skips this for the public client vibecollector-ui on the code
+// and refresh grants.
+func (s *Server) clientSecretOK(w http.ResponseWriter, r *http.Request, id, secret string, viaHeader bool) bool {
+	ok, err := s.clients.OAuthSecretOK(r.Context(), id, secret)
+	if err != nil {
+		oauthErr(w, http.StatusInternalServerError, "server_error")
+		return false
+	}
+	if !ok {
+		writeClientAuthResult(w, viaHeader, http.StatusUnauthorized, "invalid_client")
+		return false
+	}
+	return true
+}
+
 func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
-	id := r.PostForm.Get("client_id")
+	id, secret, viaHeader, authStatus, authCode := parseClientAuth(r)
+	if authStatus != 0 {
+		writeClientAuthResult(w, viaHeader, authStatus, authCode)
+		return
+	}
 	code := r.PostForm.Get("code")
 	redir := r.PostForm.Get("redirect_uri")
 	verifier := r.PostForm.Get("code_verifier")
@@ -546,16 +652,8 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if id != uiClientID {
-		secretOK, secretErr := s.clients.OAuthSecretOK(r.Context(), id, r.PostForm.Get("client_secret"))
-		if secretErr != nil {
-			oauthErr(w, http.StatusInternalServerError, "server_error")
-			return
-		}
-		if !secretOK {
-			oauthErr(w, http.StatusUnauthorized, "invalid_client")
-			return
-		}
+	if id != uiClientID && !s.clientSecretOK(w, r, id, secret, viaHeader) {
+		return
 	}
 	s.mu.Lock()
 	ac, ok := s.codes[code]
@@ -580,22 +678,18 @@ func (s *Server) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_scope")
 		return
 	}
-	id := r.PostForm.Get("client_id")
+	id, secret, viaHeader, authStatus, authCode := parseClientAuth(r)
+	if authStatus != 0 {
+		writeClientAuthResult(w, viaHeader, authStatus, authCode)
+		return
+	}
 	raw := r.PostForm.Get("refresh_token")
 	if id == "" || raw == "" {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if id != uiClientID {
-		secretOK, secretErr := s.clients.OAuthSecretOK(r.Context(), id, r.PostForm.Get("client_secret"))
-		if secretErr != nil {
-			oauthErr(w, http.StatusInternalServerError, "server_error")
-			return
-		}
-		if !secretOK {
-			oauthErr(w, http.StatusUnauthorized, "invalid_client")
-			return
-		}
+	if id != uiClientID && !s.clientSecretOK(w, r, id, secret, viaHeader) {
+		return
 	}
 	res := s.redeemRefresh(raw, id)
 	if res.status != http.StatusOK {
@@ -610,15 +704,12 @@ func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_scope")
 		return
 	}
-	id := r.PostForm.Get("client_id")
-	secret := r.PostForm.Get("client_secret")
-	ok, err := s.clients.OAuthSecretOK(r.Context(), id, secret)
-	if err != nil {
-		oauthErr(w, http.StatusInternalServerError, "server_error")
+	id, secret, viaHeader, authStatus, authCode := parseClientAuth(r)
+	if authStatus != 0 {
+		writeClientAuthResult(w, viaHeader, authStatus, authCode)
 		return
 	}
-	if !ok {
-		oauthErr(w, http.StatusUnauthorized, "invalid_client")
+	if !s.clientSecretOK(w, r, id, secret, viaHeader) {
 		return
 	}
 	res := s.issueAccess()
