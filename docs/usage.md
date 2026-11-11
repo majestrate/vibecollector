@@ -24,17 +24,17 @@ See `usage` section [here](#manual-setup-cite)
 
 ### Deb / RPM
 
-Since the daemon runs as its own system user you must use a oneshot service to generate credentials.
-
 If you want a fully random clientId and clientSecret run the following:
 
-    $ sudo systemd-run --pipe --wait --collect vibecollector-gencred | tee output.txt
+    $ vibecollector-manage add -gen-id -gen-secret
 
 If you want a specific clientId (in this case `username`) run the following:
 
-    $ sudo systemd-run --pipe --wait --collect vibecollector-gencred@username | tee output.txt
+    $ vibecolector-manage add -id username -gen-secret
 
-The information will be saved to `output.txt` if you need it later.
+The user running `vibecollector-manage` must be allowed to run `sudo -u _vibecollector /usr/libexec/vibecollector/_wrapper.sh`
+
+Otherwise, the command needs root access as it assumes the user `_vibecollector` when doing any actions.
 
 The webui is at http://127.0.0.1:8080/ by default.
 

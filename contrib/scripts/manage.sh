@@ -1,0 +1,3 @@
+#!/usr/bin/env bash
+set -x
+sudo -u _vibecollector /usr/libexec/vibecollector/_wrapper.sh "$@"

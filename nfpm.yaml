@@ -25,10 +25,22 @@ contents:
       mode: 0700
       owner: root
       group: root
+  - src: ./contrib/scripts/_wrapper.sh
+    dst: /usr/libexec/vibecollector/_wrapper.sh
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
+  - src: ./contrib/scripts/manage.sh
+    dst: /usr/bin/vibecollector-manage
+    file_info:
+      mode: 0755
+      owner: root
+      group: root
   - src: ./out/vibecollector
     dst: /usr/bin/vibecollector
   - src: ./out/vibecollector-manage
-    dst: /usr/bin/vibecollector-manage
+    dst: /usr/libexec/vibecollector/manage.bin
   - src: ./out/vibecollector-genconf
     dst: /usr/bin/vibecollector-genconf
   - src: /etc/vibecollector.toml
@@ -36,20 +48,6 @@ contents:
     type: symlink
   - src: ./contrib/systemd/vibecollector.service
     dst: /usr/lib/systemd/system/vibecollector.service
-    type: config|noreplace
-    file_info:
-      mode: 0644
-      owner: root
-      group: root
-  - src: ./contrib/systemd/vibecollector-gencred.service
-    dst: /usr/lib/systemd/system/vibecollector-gencred.service
-    type: config|noreplace
-    file_info:
-      mode: 0644
-      owner: root
-      group: root
-  - src: ./contrib/systemd/vibecollector-gencred@.service
-    dst: /usr/lib/systemd/system/vibecollector-gencred@.service
     type: config|noreplace
     file_info:
       mode: 0644
@@ -82,3 +80,6 @@ overrides:
     scripts:
       postinstall: ./contrib/scripts/deb/postinstall.sh
       preremove: ./contrib/scripts/deb/preremove.sh
+    depends:
+      - systemd | systemd-standalone-sysusers
+      - systemd | systemd-standalone-tmpfiles

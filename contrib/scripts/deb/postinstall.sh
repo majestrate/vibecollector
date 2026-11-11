@@ -13,6 +13,8 @@ if [ "$1" = "configure" ] ; then
   )
 
   if [ -d /run/systemd/system ]; then
+    systemd-sysusers /usr/lib/sysusers.d/vibecollector.conf
+    systemd-tmpfiles --create /usr/lib/tmpfiles.d/vibecollector.conf
     systemctl --system daemon-reload
     systemctl preset vibecollector.service
     systemctl restart vibecollector.service

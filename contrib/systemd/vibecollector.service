@@ -5,8 +5,6 @@ Wants=network-online.target
 
 [Service]
 User=_vibecollector
-ProtectSystem=true
-StateDirectory=/var/lib/vibecollector
 ExecStart=/usr/bin/vibecollector
 WorkingDirectory=/var/lib/vibecollector
 ExecReload=/bin/kill -HUP $MAINPID
