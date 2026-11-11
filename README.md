@@ -2,9 +2,8 @@
 
 A MASSIVELY (multiplayer online?) vibecoded Netflow Collector with OAUTH gated REST API and react+vite webui.
 
-## Building
+## Documentation
 
-Requirements:
+- [Humans](docs/usage.md)
+- [Clankers](AGENTS.md)
 
-* go >= 1.27
-* [nfpm](https://nfpm.goreleaser.com/docs/install/)

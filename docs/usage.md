@@ -2,6 +2,11 @@
 
 ## Building
 
+Requirements:
+
+* go >= 1.27
+* [nfpm](https://nfpm.goreleaser.com/docs/install/)
+
 To make a deb and rpm package do the following:
 
     $ make package
