@@ -7,4 +7,5 @@ ui/test-results
 *.db-shm
 /vibecollector
 /vibecollector-clients
+/vibecollector-config
 resume-grok-session.sh

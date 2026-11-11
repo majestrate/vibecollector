@@ -18,7 +18,7 @@ Give the SQLite file and its directory permissions that match who should be able
 
 Run one collector process. It binds the UDP socket, creates or opens the SQLite database, and serves the UI API.
 
-The config file is `./vibecollector.toml` when that file is present. Otherwise the process uses built-in defaults. A missing default file is not an error. `-config PATH` selects a file. A missing file named by `-config` is a startup error.
+The config file is `./vibecollector.toml` when that file is present. Otherwise the process uses built-in defaults. A missing default file is not an error. `-config PATH` selects a file. A missing file named by `-config` is a startup error. `vibecollector-config` prints a config of those built-in defaults to stdout. It does not start the collector.
 
 An unknown key is a startup error. A typo does not silently take effect.
 
@@ -63,7 +63,7 @@ vibecollector-clients list
 vibecollector-clients remove -id probe
 ```
 
-`add` with an existing id replaces that secret. `list` prints ids only. A script then requests a token with `grant_type=client_credentials`, that `client_id`, and that `client_secret`. Any stored pair is accepted. A pair that is not stored is rejected. `make build` writes both `vibecollector` and `vibecollector-clients`.
+`add` with an existing id replaces that secret. `list` prints ids only. A script then requests a token with `grant_type=client_credentials`, that `client_id`, and that `client_secret`. Any stored pair is accepted. A pair that is not stored is rejected. `make build` writes `vibecollector`, `vibecollector-clients`, and `vibecollector-config`.
 
 ## Point exporters at the collector
 
