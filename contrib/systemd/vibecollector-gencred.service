@@ -2,6 +2,7 @@
 Description=Create User Credential
 
 [Service]
+type=oneshot
 User=_vibecollector
 ProtectSystem=true
 StateDirectory=/var/lib/vibecollector

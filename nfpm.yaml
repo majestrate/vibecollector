@@ -41,6 +41,20 @@ contents:
       mode: 0644
       owner: root
       group: root
+  - src: ./contrib/systemd/vibecollector-gencred.service
+    dst: /usr/lib/systemd/system/vibecollector-gencred.service
+    type: config|noreplace
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./contrib/systemd/vibecollector-gencred@.service
+    dst: /usr/lib/systemd/system/vibecollector-gencred@.service
+    type: config|noreplace
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
   - src: ./contrib/systemd/vibecollector.sysusers.conf
     dst: /usr/lib/sysusers.d/vibecollector.conf
     type: config|noreplace
