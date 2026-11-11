@@ -21,7 +21,7 @@ import (
 
 func main() {
 	syscall.Umask(0o077)
-	os.Exit(execute(os.Args[0], os.Args[1:], os.Stdout, os.Stderr))
+	os.Exit(execute("vibecollector-manage", os.Args[1:], os.Stdout, os.Stderr))
 }
 
 func execute(exe string, args []string, stdout, stderr io.Writer) int {
