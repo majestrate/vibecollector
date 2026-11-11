@@ -11,7 +11,7 @@ import { defineConfig } from "vitest/config";
 function isUiPath(url: string): boolean {
   const path = url.split("?")[0] ?? "/";
   if (path === "/" || path === "/index.html") return true;
-  const spa = ["/flows", "/traffic", "/talkers", "/asn", "/reputation", "/map", "/globe", "/callback"];
+  const spa = ["/flows", "/traffic", "/talkers", "/asn", "/reputation", "/map", "/globe", "/callback", "/credentials"];
   if (spa.includes(path)) return true;
   if (path === "/src" || path.startsWith("/src/")) return true;
   if (path.startsWith("/@")) return true;

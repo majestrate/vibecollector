@@ -1,5 +1,6 @@
 import { useEffect, useState, type FormEvent, type ReactElement } from "react";
 import { NavLink, Route, Routes } from "react-router-dom";
+import { clearAuthError, rememberReturn } from "./auth";
 import { getJSON } from "./geo/fetch";
 import {
   calendarRange,
@@ -188,6 +189,15 @@ export function Shell(): ReactElement {
           <NavLink to={`/reputation${linkSearch}`}>Reputation</NavLink>
           <NavLink to={`/map${linkSearch}`}>Map</NavLink>
           <NavLink to={`/globe${linkSearch}`}>Globe</NavLink>
+          <NavLink
+            to="/credentials"
+            onClick={() => {
+              clearAuthError();
+              rememberReturn();
+            }}
+          >
+            Credentials
+          </NavLink>
         </nav>
       </header>
       <ExporterStrip />

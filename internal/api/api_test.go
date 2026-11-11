@@ -33,10 +33,13 @@ func TestNewServerNil(t *testing.T) {
 	}
 	counters := obs.NewCounters()
 	cfg := config.HTTP{APIPrefix: "/api/v1", QueryCacheTTL: time.Second, QueryCacheEntries: 8}
-	if _, err := NewServer(cfg, config.OAuth2{}, nil, counters, nil); !errors.Is(err, ErrNilDep) {
+	if _, err := NewServer(cfg, config.OAuth2{}, nil, db, counters, nil); !errors.Is(err, ErrNilDep) {
 		t.Fatal(err)
 	}
-	if _, err := NewServer(cfg, config.OAuth2{}, q, nil, nil); !errors.Is(err, ErrNilDep) {
+	if _, err := NewServer(cfg, config.OAuth2{}, q, nil, counters, nil); !errors.Is(err, ErrNilDep) {
+		t.Fatal(err)
+	}
+	if _, err := NewServer(cfg, config.OAuth2{}, q, db, nil, nil); !errors.Is(err, ErrNilDep) {
 		t.Fatal(err)
 	}
 }
@@ -239,6 +242,141 @@ func TestClientCredentialsOmitsRefresh(t *testing.T) {
 	}
 }
 
+func TestClientCredentialsAreIndependent(t *testing.T) {
+	s, db := newAPI(t, "/api/v1", "")
+	ctx := context.Background()
+	if _, err := db.PutOAuthClient(ctx, "alpha", "one"); err != nil {
+		t.Fatal(err)
+	}
+	if _, err := db.PutOAuthClient(ctx, "beta", "two"); err != nil {
+		t.Fatal(err)
+	}
+	if clientCall(t, s, "alpha", "one").Code != http.StatusOK {
+		t.Fatal("alpha")
+	}
+	if clientCall(t, s, "beta", "two").Code != http.StatusOK {
+		t.Fatal("beta")
+	}
+	if clientCall(t, s, "alpha", "two").Code == http.StatusOK {
+		t.Fatal("alpha accepted beta's secret")
+	}
+	if clientCall(t, s, "gamma", "one").Code == http.StatusOK {
+		t.Fatal("unknown client")
+	}
+}
+
+func TestRegisteredClientPKCE(t *testing.T) {
+	s, db := newAPI(t, "/api/v1", "")
+	if _, err := db.PutOAuthClient(context.Background(), "probe", "s3cret"); err != nil {
+		t.Fatal(err)
+	}
+	unknown := url.Values{}
+	unknown.Set("response_type", "code")
+	unknown.Set("client_id", "nope")
+	unknown.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	unknown.Set("code_challenge", pkceChallenge(t))
+	unknown.Set("code_challenge_method", "S256")
+	rr := call(s, http.MethodGet, "/oauth/authorize?"+unknown.Encode(), nil, nil)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	buf := make([]byte, 32)
+	if _, err := rand.Read(buf); err != nil {
+		t.Fatal(err)
+	}
+	verifier := base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "probe")
+	q.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	q.Set("code_challenge", base64.RawURLEncoding.EncodeToString(sum[:]))
+	q.Set("code_challenge_method", "S256")
+	q.Set("state", "st")
+	q.Set("scope", "read")
+	rr = call(s, http.MethodGet, "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == pkceCookie && c.Value != "" {
+			t.Fatal("client challenge still minted a verifier cookie")
+		}
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := loc.Query().Get("code")
+	if code == "" || loc.Query().Get("state") != "st" {
+		t.Fatal(rr.Header().Get("Location"))
+	}
+	bad := url.Values{}
+	bad.Set("grant_type", "authorization_code")
+	bad.Set("code", code)
+	bad.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	bad.Set("client_id", "probe")
+	bad.Set("client_secret", "wrong")
+	bad.Set("code_verifier", verifier)
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(bad.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "invalid_client") {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	good := url.Values{}
+	good.Set("grant_type", "authorization_code")
+	good.Set("code", code)
+	good.Set("redirect_uri", "http://127.0.0.1:8080/callback")
+	good.Set("client_id", "probe")
+	good.Set("client_secret", "s3cret")
+	good.Set("code_verifier", verifier)
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(good.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	access := tokenOf(t, rr.Body.Bytes())
+	refresh := refreshOf(t, rr.Body.Bytes())
+	if access == "" || refresh == "" {
+		t.Fatal(rr.Body.String())
+	}
+	bare := url.Values{}
+	bare.Set("grant_type", "refresh_token")
+	bare.Set("refresh_token", refresh)
+	bare.Set("client_id", "probe")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(bare.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusUnauthorized || !strings.Contains(rr.Body.String(), "invalid_client") {
+		t.Fatal("refresh without secret", rr.Code, rr.Body.String())
+	}
+	again := url.Values{}
+	again.Set("grant_type", "refresh_token")
+	again.Set("refresh_token", refresh)
+	again.Set("client_id", "probe")
+	again.Set("client_secret", "s3cret")
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(again.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if rr.Code != http.StatusOK || tokenOf(t, rr.Body.Bytes()) == "" {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+}
+
+func clientCall(t *testing.T, s *Server, id, secret string) *httptest.ResponseRecorder {
+	t.Helper()
+	form := url.Values{}
+	form.Set("grant_type", "client_credentials")
+	form.Set("client_id", id)
+	form.Set("client_secret", secret)
+	form.Set("scope", "read")
+	return call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+}
+
 func TestClientCredentialsEmptySecret(t *testing.T) {
 	s, _ := newAPI(t, "/api/v1", "")
 	body := url.Values{}
@@ -372,6 +510,20 @@ func TestGeoFlowsRoundedCell(t *testing.T) {
 	}
 	if !pathHasSrc(roll["paths"].([]any), 0.2, -74.1) || !pathHasSrc(roll["paths"].([]any), 40.3, -74) {
 		t.Fatal(roll["paths"])
+	}
+}
+
+func TestRewriteSpecUsesPublicOrigin(t *testing.T) {
+	doc := map[string]any{
+		"paths":   map[string]any{"/api/v1/health": map[string]any{}},
+		"servers": []any{map[string]any{"url": "http://127.0.0.1:8080"}},
+	}
+	if err := rewriteSpec(doc, "/api/v1", "http://10.1.0.232:8080"); err != nil {
+		t.Fatal(err)
+	}
+	got, _ := doc["servers"].([]any)[0].(map[string]any)["url"].(string)
+	if got != "http://10.1.0.232:8080/api/v1" {
+		t.Fatal(got)
 	}
 }
 
@@ -623,9 +775,8 @@ func TestStaticUINotGated(t *testing.T) {
 		QueryCacheTTL:     15 * time.Second,
 		QueryCacheEntries: 32,
 	}, config.OAuth2{
-		UIClientID: "vibecollector-ui",
-		TokenTTL:   time.Hour,
-	}, q, obs.NewCounters(), ui)
+		TokenTTL: time.Hour,
+	}, q, db, obs.NewCounters(), ui)
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -672,12 +823,15 @@ func newAPI(t *testing.T, prefix, secret string) (*Server, *store.DB) {
 		QueryCacheTTL:     15 * time.Second,
 		QueryCacheEntries: 32,
 	}, config.OAuth2{
-		UIClientID:   "vibecollector-ui",
-		TokenTTL:     time.Hour,
-		ClientSecret: secret,
-	}, q, obs.NewCounters(), nil)
+		TokenTTL: time.Hour,
+	}, q, db, obs.NewCounters(), nil)
 	if err != nil {
 		t.Fatal(err)
+	}
+	if secret != "" {
+		if _, err := db.PutOAuthClient(context.Background(), "vibecollector-ui", secret); err != nil {
+			t.Fatal(err)
+		}
 	}
 	return s, db
 }
@@ -749,6 +903,87 @@ func pathHasSrc(paths []any, lat, lon float64) bool {
 	for _, item := range paths {
 		src, _ := item.(map[string]any)["src"].(map[string]any)
 		if src["kind"] == "coord" && src["lat"] == lat && src["lon"] == lon {
+			return true
+		}
+	}
+	return false
+}
+
+func TestAuthorizeMintsPKCE(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "s3cret")
+	q := url.Values{}
+	q.Set("response_type", "code")
+	q.Set("client_id", "vibecollector-ui")
+	q.Set("redirect_uri", "http://127.0.0.1:8080/cb")
+	q.Set("scope", "read")
+	rr := call(s, http.MethodGet, "/oauth/authorize?"+q.Encode(), nil, nil)
+	if rr.Code != http.StatusFound {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	loc, err := url.Parse(rr.Header().Get("Location"))
+	if err != nil {
+		t.Fatal(err)
+	}
+	code := loc.Query().Get("code")
+	state := loc.Query().Get("state")
+	if code == "" || state == "" {
+		t.Fatal(rr.Header().Get("Location"))
+	}
+	verifier := mintedCookie(t, rr, pkceCookie)
+	if mintedCookie(t, rr, stateCookie) != state {
+		t.Fatal("state cookie")
+	}
+	form := url.Values{}
+	form.Set("grant_type", "authorization_code")
+	form.Set("code", code)
+	form.Set("redirect_uri", "http://127.0.0.1:8080/cb")
+	form.Set("client_id", "vibecollector-ui")
+	form.Set("state", state)
+	form.Set("scope", "read")
+	hdr := map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+		"Cookie":       pkceCookie + "=" + verifier + "; " + stateCookie + "=" + state,
+	}
+	bare := call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), map[string]string{
+		"Content-Type": "application/x-www-form-urlencoded",
+	})
+	if bare.Code != http.StatusBadRequest {
+		t.Fatal(bare.Code, bare.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), hdr)
+	if rr.Code != http.StatusOK {
+		t.Fatal(rr.Code, rr.Body.String())
+	}
+	if tokenOf(t, rr.Body.Bytes()) == "" || refreshOf(t, rr.Body.Bytes()) == "" {
+		t.Fatal(rr.Body.String())
+	}
+	if !cookieCleared(rr, pkceCookie) || !cookieCleared(rr, stateCookie) {
+		t.Fatal(rr.Header().Values("Set-Cookie"))
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(form.Encode()), hdr)
+	if rr.Code == http.StatusOK {
+		t.Fatal("code reused")
+	}
+}
+
+func mintedCookie(t *testing.T, rr *httptest.ResponseRecorder, name string) string {
+	t.Helper()
+	for _, c := range rr.Result().Cookies() {
+		if c.Name != name {
+			continue
+		}
+		if !c.HttpOnly || c.Path != "/oauth/token" || c.Value == "" {
+			t.Fatal(c)
+		}
+		return c.Value
+	}
+	t.Fatalf("missing %s", name)
+	return ""
+}
+
+func cookieCleared(rr *httptest.ResponseRecorder, name string) bool {
+	for _, c := range rr.Result().Cookies() {
+		if c.Name == name && c.MaxAge < 0 {
 			return true
 		}
 	}

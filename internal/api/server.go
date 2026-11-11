@@ -33,6 +33,18 @@ const csp = "default-src 'self'; img-src 'self' data:; connect-src 'self'; style
 
 const queryTimeout = 5 * time.Second
 
+// uiClientID is the public client. It sends no secret.
+// The web UI signs in as a client id stored in oauth_client and sends that secret
+// on the token request. Confidential clients are rows in oauth_client.
+const uiClientID = "vibecollector-ui"
+
+// pkceCookie and stateCookie carry the daemon-minted PKCE verifier and state.
+// They are HttpOnly, so the page cannot read them. Path limits them to the token route.
+const (
+	pkceCookie  = "vc_pkce"
+	stateCookie = "vc_state"
+)
+
 var errBadRange = errors.New("bad_range")
 
 // Server is the HTTP API and the OAuth2 authorization server for this UI.
@@ -40,6 +52,12 @@ var errBadRange = errors.New("bad_range")
 // including health, requires an Authorization bearer with scope read.
 // The bearer is an opaque access token. The UI grant also returns an opaque
 // refresh token that rotates on use. Both live in process memory.
+// The web UI obtains them from the authorization-code grant with PKCE.
+// The page creates the verifier and the S256 challenge for a client id stored in clients.
+// The token request sends that client id, its secret, and the verifier.
+// GET /oauth/authorize without code_challenge still mints a verifier, stores it in an
+// HttpOnly cookie, and redirects with the code. That path is the public client.
+// client_credentials accepts any client id and secret stored in clients.
 // GET /openapi.json, GET /oauth/authorize, and POST /oauth/token stay at
 // the site root and are not token-gated. Static files from ui are not gated.
 type Server struct {
@@ -47,6 +65,7 @@ type Server struct {
 	prefix   string
 	oauth    config.OAuth2
 	q        *store.Query
+	clients  *store.DB
 	counters *obs.Counters
 	cache    *Cache
 	ui       fs.FS
@@ -69,12 +88,16 @@ type authCode struct {
 
 // NewServer builds the routes, the query cache, and the served OpenAPI document.
 // cfg.APIPrefix empty means /api/v1. oauth is the in-process authorization server.
-// q and counters are required; a nil returns ErrNilDep. ui is the static tree.
+// q, clients, and counters are required; a nil returns ErrNilDep. clients is the
+// credential directory for client_credentials. ui is the static tree.
 // A nil ui serves no files. A non-positive query-cache TTL or entry cap returns ErrBadCap.
 // The handler does not terminate TLS.
-func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, counters *obs.Counters, ui fs.FS) (*Server, error) {
+func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, clients *store.DB, counters *obs.Counters, ui fs.FS) (*Server, error) {
 	if q == nil {
 		return nil, fmt.Errorf("%w: query", ErrNilDep)
+	}
+	if clients == nil {
+		return nil, fmt.Errorf("%w: clients", ErrNilDep)
 	}
 	if counters == nil {
 		return nil, fmt.Errorf("%w: counters", ErrNilDep)
@@ -82,9 +105,6 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, counters *o
 	prefix := cfg.APIPrefix
 	if prefix == "" {
 		prefix = "/api/v1"
-	}
-	if oauth.UIClientID == "" {
-		oauth.UIClientID = "vibecollector-ui"
 	}
 	cache, err := NewQueryCache(cfg.QueryCacheTTL, cfg.QueryCacheEntries)
 	if err != nil {
@@ -94,7 +114,7 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, counters *o
 	if err != nil {
 		return nil, err
 	}
-	if err := rewriteSpec(doc, prefix); err != nil {
+	if err := rewriteSpec(doc, prefix, oauth.Issuer); err != nil {
 		return nil, err
 	}
 	spec, err := json.Marshal(doc)
@@ -106,6 +126,7 @@ func NewServer(cfg config.HTTP, oauth config.OAuth2, q *store.Query, counters *o
 		prefix:   prefix,
 		oauth:    oauth,
 		q:        q,
+		clients:  clients,
 		counters: counters,
 		cache:    cache,
 		ui:       ui,
@@ -347,11 +368,16 @@ func bearerToken(r *http.Request) (string, bool) {
 
 func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	q := r.URL.Query()
-	if q.Get("response_type") != "code" || q.Get("code_challenge_method") != "S256" {
+	if q.Get("response_type") != "code" {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if q.Get("client_id") != s.oauth.UIClientID {
+	known, err := s.knownOAuthClient(r.Context(), q.Get("client_id"))
+	if err != nil {
+		oauthErr(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	if !known {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
@@ -364,16 +390,48 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	raw, err := base64.RawURLEncoding.DecodeString(q.Get("code_challenge"))
-	if err != nil || len(raw) != 32 {
-		oauthErr(w, http.StatusBadRequest, "invalid_request")
-		return
+	challenge := q.Get("code_challenge")
+	method := q.Get("code_challenge_method")
+	verifier := ""
+	state := q.Get("state")
+	minted := false
+	if challenge == "" {
+		if method != "" {
+			oauthErr(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		var err error
+		verifier, challenge, err = newPKCE()
+		if err != nil {
+			oauthErr(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		state, err = randomID()
+		if err != nil {
+			oauthErr(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		minted = true
+	} else {
+		if method != "S256" {
+			oauthErr(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		raw, err := base64.RawURLEncoding.DecodeString(challenge)
+		if err != nil || len(raw) != sha256.Size {
+			oauthErr(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
 	}
 	code := s.issueCode(authCode{
-		challenge: q.Get("code_challenge"),
+		challenge: challenge,
 		clientID:  q.Get("client_id"),
 		redirect:  redir,
 	})
+	if code == "" {
+		oauthErr(w, http.StatusInternalServerError, "server_error")
+		return
+	}
 	u, err := url.Parse(redir)
 	if err != nil {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
@@ -381,12 +439,15 @@ func (s *Server) handleAuthorize(w http.ResponseWriter, r *http.Request) {
 	}
 	qq := u.Query()
 	qq.Set("code", code)
-	if st := q.Get("state"); st != "" {
-		qq.Set("state", st)
+	if state != "" {
+		qq.Set("state", state)
 	}
 	u.RawQuery = qq.Encode()
 	w.Header().Set("Cache-Control", "no-store")
 	w.Header().Set("Pragma", "no-cache")
+	if minted {
+		setPKCECookies(w, verifier, state)
+	}
 	http.Redirect(w, r, u.String(), http.StatusFound)
 }
 
@@ -416,13 +477,34 @@ func (s *Server) tokenCode(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_scope")
 		return
 	}
+	if verifier == "" {
+		pkce, pkceErr := r.Cookie(pkceCookie)
+		st, stErr := r.Cookie(stateCookie)
+		if pkceErr != nil || pkce.Value == "" {
+			oauthErr(w, http.StatusBadRequest, "invalid_request")
+			return
+		}
+		clearPKCECookies(w)
+		if stErr != nil || st.Value == "" || r.PostForm.Get("state") == "" || subtle.ConstantTimeCompare([]byte(st.Value), []byte(r.PostForm.Get("state"))) != 1 {
+			oauthErr(w, http.StatusBadRequest, "invalid_grant")
+			return
+		}
+		verifier = pkce.Value
+	}
 	if id == "" || code == "" || redir == "" || verifier == "" {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if id != s.oauth.UIClientID {
-		oauthErr(w, http.StatusUnauthorized, "invalid_client")
-		return
+	if id != uiClientID {
+		secretOK, secretErr := s.clients.OAuthSecretOK(r.Context(), id, r.PostForm.Get("client_secret"))
+		if secretErr != nil {
+			oauthErr(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		if !secretOK {
+			oauthErr(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
 	}
 	s.mu.Lock()
 	ac, ok := s.codes[code]
@@ -453,9 +535,16 @@ func (s *Server) tokenRefresh(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	if id != s.oauth.UIClientID {
-		oauthErr(w, http.StatusUnauthorized, "invalid_client")
-		return
+	if id != uiClientID {
+		secretOK, secretErr := s.clients.OAuthSecretOK(r.Context(), id, r.PostForm.Get("client_secret"))
+		if secretErr != nil {
+			oauthErr(w, http.StatusInternalServerError, "server_error")
+			return
+		}
+		if !secretOK {
+			oauthErr(w, http.StatusUnauthorized, "invalid_client")
+			return
+		}
 	}
 	res := s.redeemRefresh(raw, id)
 	if res.status != http.StatusOK {
@@ -472,7 +561,12 @@ func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
 	}
 	id := r.PostForm.Get("client_id")
 	secret := r.PostForm.Get("client_secret")
-	if id != s.oauth.UIClientID || !secretOK(secret, s.oauth.ClientSecret) {
+	ok, err := s.clients.OAuthSecretOK(r.Context(), id, secret)
+	if err != nil {
+		oauthErr(w, http.StatusInternalServerError, "server_error")
+		return
+	}
+	if !ok {
 		oauthErr(w, http.StatusUnauthorized, "invalid_client")
 		return
 	}
@@ -482,6 +576,16 @@ func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
 		return
 	}
 	s.writeTokens(w, res.access, res.secs, "")
+}
+
+// knownOAuthClient reports whether id may use the authorization-code grant.
+// vibecollector-ui is the public client. Any other id must be registered.
+// A database error is returned to the caller.
+func (s *Server) knownOAuthClient(ctx context.Context, id string) (bool, error) {
+	if id == uiClientID {
+		return true, nil
+	}
+	return s.clients.OAuthClientExists(ctx, id)
 }
 
 func (s *Server) issueCode(c authCode) string {
@@ -503,14 +607,38 @@ func (s *Server) issueCode(c authCode) string {
 	return code
 }
 
-func secretOK(got, want string) bool {
-	g := sha256.Sum256([]byte(got))
-	w := sha256.Sum256([]byte(want))
-	match := subtle.ConstantTimeCompare(g[:], w[:]) == 1
-	if want == "" {
-		return false
+// newPKCE returns a verifier and its S256 challenge.
+// The verifier is what the token endpoint hashes. The challenge is stored with the code.
+func newPKCE() (verifier, challenge string, err error) {
+	buf := make([]byte, 32)
+	if _, err = rand.Read(buf); err != nil {
+		return "", "", err
 	}
-	return match
+	verifier = base64.RawURLEncoding.EncodeToString(buf)
+	sum := sha256.Sum256([]byte(verifier))
+	challenge = base64.RawURLEncoding.EncodeToString(sum[:])
+	return verifier, challenge, nil
+}
+
+func setPKCECookies(w http.ResponseWriter, verifier, state string) {
+	http.SetCookie(w, pkceCookieValue(pkceCookie, verifier, 600))
+	http.SetCookie(w, pkceCookieValue(stateCookie, state, 600))
+}
+
+func clearPKCECookies(w http.ResponseWriter) {
+	http.SetCookie(w, pkceCookieValue(pkceCookie, "", -1))
+	http.SetCookie(w, pkceCookieValue(stateCookie, "", -1))
+}
+
+func pkceCookieValue(name, value string, maxAge int) *http.Cookie {
+	return &http.Cookie{
+		Name:     name,
+		Value:    value,
+		Path:     "/oauth/token",
+		MaxAge:   maxAge,
+		HttpOnly: true,
+		SameSite: http.SameSiteLaxMode,
+	}
 }
 
 func pkceOK(verifier, challenge string) bool {

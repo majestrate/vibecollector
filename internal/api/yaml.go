@@ -565,8 +565,10 @@ func (p *fp) plain() any {
 }
 
 // rewriteSpec points data paths and the server URL at prefix.
+// issuer, when it is an absolute origin, replaces the server host.
+// An empty issuer leaves the host from the document.
 // /oauth/authorize, /oauth/token, and /openapi.json stay at the site root.
-func rewriteSpec(doc map[string]any, prefix string) error {
+func rewriteSpec(doc map[string]any, prefix, issuer string) error {
 	paths, ok := doc["paths"].(map[string]any)
 	if !ok {
 		return fmt.Errorf("openapi: paths")
@@ -590,12 +592,19 @@ func rewriteSpec(doc map[string]any, prefix string) error {
 			return fmt.Errorf("openapi: server")
 		}
 		raw, _ := m["url"].(string)
-		m["url"] = joinServerURL(raw, prefix)
+		m["url"] = joinServerURL(raw, prefix, issuer)
 	}
 	return nil
 }
 
-func joinServerURL(raw, prefix string) string {
+func joinServerURL(raw, prefix, issuer string) string {
+	if iu, err := url.Parse(issuer); err == nil && iu.Scheme != "" && iu.Host != "" {
+		iu.Path = prefix
+		iu.RawQuery = ""
+		iu.Fragment = ""
+		iu.User = nil
+		return iu.String()
+	}
 	u, err := url.Parse(raw)
 	if err != nil || u.Host == "" {
 		return strings.TrimRight(raw, "/") + prefix

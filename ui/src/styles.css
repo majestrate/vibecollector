@@ -114,6 +114,36 @@ td {
   color: #3d4a5c;
 }
 
+.credentials {
+  max-width: 28rem;
+  margin: 2rem auto;
+  padding: 1rem 1.25rem 1.25rem;
+  background: #fff;
+  border: 1px solid #d5dbe3;
+}
+
+.credentials h1 {
+  font-size: 1.25rem;
+  margin: 0 0 0.5rem;
+}
+
+.credentials p {
+  margin: 0 0 0.75rem;
+}
+
+.credentials label {
+  margin-bottom: 0.75rem;
+}
+
+.credentials input {
+  padding: 0.35rem 0.45rem;
+}
+
+.credentials .actions {
+  display: flex;
+  gap: 0.5rem;
+}
+
 .chart {
   height: 320px;
   width: 100%;

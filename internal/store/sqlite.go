@@ -23,8 +23,9 @@ import (
 //go:embed migrations/*.sql
 var migrationFS embed.FS
 
-// DB is the opened pool. Callers outside store use Writer, Sweeper, and Query.
-// They do not call Exec on DB.
+// DB is the opened pool. Writer, Sweeper, and Query use it. PutOAuthClient,
+// DeleteOAuthClient, ListOAuthClients, and OAuthSecretOK are the credential
+// directory. Callers do not run SQL on DB.
 type DB struct {
 	pool *sql.DB
 	// shedRaw is set by Sweeper when the database volume is under 5 GiB free.
@@ -65,6 +66,14 @@ func Open(cfg config.DB) (*DB, error) {
 		return nil, err
 	}
 	return &DB{pool: pool, rawRetention: cfg.RawRetention}, nil
+}
+
+// Close closes the connection pool. Later calls on db fail.
+func (db *DB) Close() error {
+	if db == nil || db.pool == nil {
+		return nil
+	}
+	return db.pool.Close()
 }
 
 // Checkpoint runs wal_checkpoint(TRUNCATE) on the open pool. main calls it

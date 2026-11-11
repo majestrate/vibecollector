@@ -22,9 +22,9 @@ The config file is `./vibecollector.toml` when that file is present. Otherwise t
 
 An unknown key is a startup error. A typo does not silently take effect.
 
-`http.listen` defaults to `127.0.0.1:8080`. `http.token` is accepted and ignored. Every route under `http.api_prefix` requires an OAuth2 bearer token with scope `read`. A missing or rejected token is 401, including on loopback. The token is not read from the query string. `http.api_prefix` defaults to `/api/v1` when it is omitted or empty. It must start with `/`, must not end with `/`, and must not contain `?`, `#`, `..`, or an empty segment.
+`http.listen` defaults to `127.0.0.1:8080`. `0.0.0.0:port` and `[::]:port` listen on every interface. `http.public_host` is the host clients use to reach the daemon. It is a hostname or `host:port`, with no scheme. An omitted port uses the port from `http.listen`. `0.0.0.0` and `::` are not a public host. `http.token` is accepted and ignored. Every route under `http.api_prefix` requires an OAuth2 bearer token with scope `read`. A missing or rejected token is 401, including on loopback. The token is not read from the query string. `http.api_prefix` defaults to `/api/v1` when it is omitted or empty. It must start with `/`, must not end with `/`, and must not contain `?`, `#`, `..`, or an empty segment.
 
-`[oauth2] issuer` defaults to `http://` plus the HTTP listen host and port after flags are applied. The daemon does not terminate TLS. The authorization redirect may use that issuer origin, or the request host. The scheme is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. `[oauth2] ui_client_id` defaults to `vibecollector-ui`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] refresh_ttl` defaults to `24h` and must be longer than `token_ttl`. `[oauth2] client_secret` may be empty. An empty secret does not issue a client-credentials token. The shell uses authorization code with PKCE and sends no client secret. The token response for that grant includes an opaque access token and an opaque refresh token. The page keeps both in memory, sends the access token as `Authorization: Bearer`, and posts the refresh token to `/oauth/token` with `grant_type=refresh_token` before `expires_in`. A spent refresh token ends that session. Neither value is stored in localStorage or placed in the query string. A restart forgets both. Client credentials does not return a refresh token.
+`[oauth2] issuer` is an allowed origin for the authorization redirect. When it is empty and `http.public_host` is set, the issuer is `http://` plus that host. When both are empty and `http.listen` names a specific address, the issuer is `http://` plus `http.listen` after flags are applied. An unspecified listen address is not copied into the issuer. The redirect may use the issuer origin, or the request host. The daemon does not terminate TLS. The scheme on the request-host check is `https` when the proxy sends `X-Forwarded-Proto: https`, and `http` otherwise. Set `oauth2.issuer` to an `https` origin when the public scheme is `https`. `[oauth2] token_ttl` defaults to `1h`. `[oauth2] refresh_ttl` defaults to `24h` and must be longer than `token_ttl`. `ui_client_id` and `client_secret` are not config keys. The shell starts on `/credentials`. The operator enters a client id and client secret stored with `vibecollector-clients`. The page keeps that pair in sessionStorage for the tab. It then runs the authorization-code grant with PKCE. The page creates the verifier and the S256 challenge. It uses `crypto.subtle` when that digest works, and an in-page SHA-256 otherwise. The authorize request carries `client_id`, `code_challenge`, and `code_challenge_method` `S256`. The client secret stays off that URL. The token request sends `code`, `code_verifier`, `client_id`, and `client_secret`. The response is an opaque access token and an opaque refresh token. The page keeps both in memory, sends the access token as `Authorization: Bearer`, and posts the refresh token with the same client id and secret before `expires_in`. A spent refresh token ends that session. A missing pair opens `/credentials`. Reloading the tab keeps the pair and signs in again. Closing the tab clears the pair. A collector restart forgets the access token and the refresh token. A caller that omits `code_challenge` still gets a daemon-minted verifier in an HttpOnly cookie. That public client id is `vibecollector-ui` and it has no secret. The page does not use it. Client credentials does not return a refresh token.
 
 `GET /openapi.json` serves the OpenAPI document and does not require a token. `GET /oauth/authorize` and `POST /oauth/token` are the daemon's token endpoints and do not require an access token.
 
@@ -43,6 +43,7 @@ Configuration covers:
 - the UDP listen address and port (default port UDP 2055)
 - the path to the SQLite database
 - the HTTP listen address for the UI and API
+- the public HTTP host clients use when the listen address is not that host
 - enrichment cache lifetimes (`geoip_ttl` defaults to 24h, `asn_ttl` defaults to 24h, `reputation_ttl` defaults to 1h)
 - how long raw flows and UI aggregates are kept
 
@@ -51,6 +52,18 @@ Configuration covers:
 Until a provider client replaces the stub in code, GeoIP, ASN, and reputation stay empty. The collector still stores flows.
 
 Bind the HTTP service to localhost unless you intend other machines to open the UI. Flow data is sensitive. Put a reverse proxy with access control in front of the HTTP port if you expose it beyond the collector host.
+
+## OAuth clients
+
+The browser signs in as a client id and secret entered on `/credentials` and kept in sessionStorage for the tab. That pair is a row in the collector's SQLite database. The database stores a hash of the secret. `vibecollector-clients` is a separate program that manages those rows. It does not run the collector. `-db` and `-config` select the same database the daemon opens. The default path is `./vibecollector.db`. Script clients use the same table with `grant_type=client_credentials`.
+
+```
+vibecollector-clients add -id probe -secret 'choose-a-secret'
+vibecollector-clients list
+vibecollector-clients remove -id probe
+```
+
+`add` with an existing id replaces that secret. `list` prints ids only. A script then requests a token with `grant_type=client_credentials`, that `client_id`, and that `client_secret`. Any stored pair is accepted. A pair that is not stored is rejected. `make build` writes both `vibecollector` and `vibecollector-clients`.
 
 ## Point exporters at the collector
 
@@ -64,7 +77,7 @@ Confirm the host firewall allows the chosen UDP port from the exporters.
 
 ## Read the data
 
-Open the web UI and choose a time range. The views read the local database and share that range and the current filters. Choose a calendar day to hold every view to that day. Day boundaries follow the selected timezone, midnight to midnight, and the default is UTC.
+Open the web UI. The first page asks for a client id and secret. After that, choose a time range. The views read the local database and share that range and the current filters. Choose a calendar day to hold every view to that day. Day boundaries follow the selected timezone, midnight to midnight, and the default is UTC.
 
 - **Flows** lists individual conversations. Filter by address, port, protocol, exporter, country, ASN, or reputation. Pages are 100 flows. Sampled flows are badged `sampled 1:N`. Total counters, L4 payload, and a clamped clock are badged. Direction is shown for ingress and egress. An optional column is `octets * sampling_interval`, labeled estimated, not stored.
 - **Traffic** shows octets and packets over time. Sampled and unsampled exports are separate lines. Neither line is multiplied by the sampling interval.

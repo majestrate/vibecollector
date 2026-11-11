@@ -6,3 +6,5 @@ ui/test-results
 *.db-wal
 *.db-shm
 /vibecollector
+/vibecollector-clients
+resume-grok-session.sh

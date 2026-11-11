@@ -1,6 +1,7 @@
 import { useEffect, useRef, useState, type ReactElement, type ReactNode } from "react";
 import { LoginFailed, Unauthorized } from "./api";
-import { startLogin } from "./auth";
+import { openCredentials, startLogin } from "./auth";
+import { clientCreds } from "./session";
 import { useFilters } from "./filters";
 import { FilterOutsideRaw, getJSON, QueryTimeout } from "./geo/fetch";
 
@@ -102,7 +103,7 @@ export function QueryNotice({ error, source }: { error?: unknown; source?: strin
         <button
           type="button"
           onClick={() => {
-            void startLogin().catch((err: unknown) => {
+            void (clientCreds() ? startLogin() : openCredentials()).catch((err: unknown) => {
               setRetry(err instanceof Error ? err.message : "Sign-in failed.");
             });
           }}

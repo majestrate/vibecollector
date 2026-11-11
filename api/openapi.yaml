@@ -35,8 +35,9 @@ servers:
     description: |
       Daemon HTTP listener. REST routes are mounted at `http.api_prefix`
       (default `/api/v1`). This document writes those paths at the default.
-      The served copy uses the configured prefix. OAuth2 and this document
-      stay at the site root.
+      The served copy uses the configured prefix. When `http.public_host`
+      or `oauth2.issuer` names an origin, the served copy uses that origin.
+      OAuth2 and this document stay at the site root.
 tags:
   - name: status
     description: Process and exporter health. These routes do not take a time range.
@@ -689,11 +690,16 @@ paths:
       summary: Authorization code with PKCE
       description: |
         Starts the authorization-code grant with PKCE.
-        On success the daemon redirects to `redirect_uri` with `code` and, when the
-        client sent one, `state`.
-        The client redeems `code` at `POST /oauth/token` with `code_verifier`.
-        `code_challenge` is the base64url-encoded SHA-256 digest of `code_verifier`
-        without padding. `code_challenge_method` is `S256`.
+        The web UI sends `client_id` for a client stored in the database, plus
+        `code_challenge` and `code_challenge_method` `S256`. The page computes
+        that challenge. `code_challenge` is the base64url-encoded SHA-256 digest
+        of `code_verifier` without padding. The client secret is not on this URL.
+        A caller that omits `code_challenge` and `code_challenge_method` gets a
+        daemon-minted verifier and `state`. The daemon stores them in HttpOnly
+        cookies `vc_pkce` and `vc_state` (path `/oauth/token`) and redirects to
+        `redirect_uri` with `code` and `state`.
+        `client_id` is `vibecollector-ui` or a registered client id.
+        The code is redeemed at `POST /oauth/token`.
         This route does not accept an access token. `security` is empty so a client
         can start the grant before it has one.
       security: []
@@ -728,31 +734,43 @@ paths:
         - name: state
           in: query
           required: false
-          description: Opaque client value returned unchanged on the redirect.
+          description: |
+            Opaque client value returned unchanged on the redirect.
+            Ignored when `code_challenge` is omitted; the daemon generates `state` then.
           schema:
             type: string
         - name: code_challenge
           in: query
-          required: true
+          required: false
           description: |
             PKCE challenge. Base64url-encoded SHA-256 of `code_verifier`, without padding.
+            Omit it for the UI. The daemon mints the challenge and the verifier.
           schema:
             type: string
         - name: code_challenge_method
           in: query
-          required: true
-          description: PKCE method. `S256` is required.
+          required: false
+          description: |
+            PKCE method. `S256` is required when `code_challenge` is sent.
+            Omit it when the daemon mints the challenge.
           schema:
             type: string
             enum: [S256]
       responses:
         "302":
           description: |
-            Redirect to `redirect_uri` with the authorization `code` and the client `state`.
+            Redirect to `redirect_uri` with the authorization `code` and `state`.
+            When the daemon minted PKCE, the response also sets `vc_pkce` and `vc_state`.
           headers:
             Location:
               description: |
-                `redirect_uri` with `code` and, when supplied, `state`.
+                `redirect_uri` with `code` and `state`.
+              schema:
+                type: string
+            Set-Cookie:
+              description: |
+                HttpOnly `vc_pkce` and `vc_state`, path `/oauth/token`, when the daemon minted PKCE.
+                The page does not read them.
               schema:
                 type: string
         "400":
@@ -770,13 +788,19 @@ paths:
         `grant_type` is `authorization_code`, `refresh_token`, or `client_credentials`.
         The body is `application/x-www-form-urlencoded`, not JSON.
 
-        `authorization_code` requires `code`, `redirect_uri`, `client_id`, and
-        the PKCE `code_verifier` for the challenge sent to `/oauth/authorize`.
-        `refresh_token` requires `refresh_token` and `client_id`. It returns a new
-        access token and a new refresh token. The previous refresh token is spent.
+        `authorization_code` requires `code`, `redirect_uri`, and `client_id`.
+        When the client sent `code_challenge`, it also sends `code_verifier`.
+        The web UI also sends `client_secret` for its registered client.
+        When the daemon minted PKCE, the client sends the `vc_pkce` and `vc_state`
+        cookies and the form field `state`, and omits `code_verifier`.
+        The public client `vibecollector-ui` sends no secret.
+        `refresh_token` requires `refresh_token` and `client_id`. A registered
+        client also sends `client_secret`. It returns a new access token and a
+        new refresh token. The previous refresh token is spent.
         Presenting a spent refresh token revokes that session.
-        `client_credentials` requires `client_id` and `client_secret` and does not
-        return a refresh token.
+        `client_credentials` requires `client_id` and `client_secret` for a pair
+        stored in the database. It does not return a refresh token.
+        Those pairs are not config values.
         Optional `scope` is `read`.
 
         The response is `access_token`, `token_type` `bearer`, `expires_in`, and `scope` `read`.
@@ -2054,12 +2078,19 @@ components:
           description: Client identifier. Required for every grant.
         client_secret:
           type: string
-          description: Client secret. Required when `grant_type` is `client_credentials`.
+          description: |
+            Client secret. Required when `grant_type` is `client_credentials`.
+            It must match a pair stored in the database. The config file does not hold it.
+        state:
+          type: string
+          description: |
+            `state` from the authorization redirect.
+            Required when the daemon minted PKCE and the verifier arrives in `vc_pkce`.
         code_verifier:
           type: string
           description: |
-            PKCE verifier for the `code_challenge` sent to `/oauth/authorize`.
-            Required when `grant_type` is `authorization_code`.
+            PKCE verifier for a `code_challenge` the client sent to `/oauth/authorize`.
+            Omit it when the daemon minted PKCE. The HttpOnly cookie `vc_pkce` carries that verifier.
         refresh_token:
           type: string
           description: |

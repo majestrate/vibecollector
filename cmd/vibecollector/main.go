@@ -103,7 +103,7 @@ func run(cfg *config.Config) int {
 		slog.Error("query", "err", err)
 		return 1
 	}
-	httpSrv, err := api.NewServer(cfg.HTTP, cfg.OAuth2, query, counters, ui.Files)
+	httpSrv, err := api.NewServer(cfg.HTTP, cfg.OAuth2, query, db, counters, ui.Files)
 	if err != nil {
 		slog.Error("http", "err", err)
 		return 1

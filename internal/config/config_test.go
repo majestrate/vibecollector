@@ -201,6 +201,45 @@ func TestListenToken(t *testing.T) {
 	}
 }
 
+func TestPublicHost(t *testing.T) {
+	cases := []struct {
+		name   string
+		body   string
+		issuer string
+		want   error
+	}{
+		{"unspecified v4", "[http]\nlisten = \"0.0.0.0:8080\"\n", "", nil},
+		{"unspecified v6", "[http]\nlisten = \"[::]:8080\"\n", "", nil},
+		{"public host takes listen port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n", "http://10.1.0.232:8080", nil},
+		{"public host keeps its port", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"collector.example:8443\"\n", "http://collector.example:8443", nil},
+		{"public ipv6", "[http]\nlisten = \"[::]:8080\"\npublic_host = \"[2001:db8::1]\"\n", "http://[2001:db8::1]:8080", nil},
+		{"specific listen", "[http]\nlisten = \"203.0.113.4:9\"\n", "http://203.0.113.4:9", nil},
+		{"explicit issuer wins", "[http]\nlisten = \"0.0.0.0:8080\"\npublic_host = \"10.1.0.232\"\n[oauth2]\nissuer = \"https://collector.example\"\n", "https://collector.example", nil},
+		{"wildcard public host", "[http]\npublic_host = \"0.0.0.0\"\n", "", ErrBadConfig},
+		{"wildcard public v6", "[http]\npublic_host = \"[::]\"\n", "", ErrBadConfig},
+		{"public host with scheme", "[http]\npublic_host = \"http://example.com\"\n", "", ErrBadConfig},
+		{"public host with path", "[http]\npublic_host = \"example.com/api\"\n", "", ErrBadConfig},
+	}
+	for _, tc := range cases {
+		t.Run(tc.name, func(t *testing.T) {
+			path := writeConfig(t, tc.body, 0o600)
+			cfg, err := Load(Flags{ConfigPath: path})
+			if tc.want != nil {
+				if !errors.Is(err, tc.want) {
+					t.Fatalf("err = %v, want %v", err, tc.want)
+				}
+				return
+			}
+			if err != nil {
+				t.Fatal(err)
+			}
+			if cfg.OAuth2.Issuer != tc.issuer {
+				t.Fatalf("issuer %q", cfg.OAuth2.Issuer)
+			}
+		})
+	}
+}
+
 func TestLooseFileMode(t *testing.T) {
 	path := writeConfig(t, "[log]\nlevel = \"info\"\n", 0o644)
 	fi, err := os.Stat(path)
@@ -264,9 +303,8 @@ func TestDefaults(t *testing.T) {
 		t.Fatalf("http defaults: %+v", cfg.HTTP)
 	}
 	if cfg.OAuth2.Issuer != "http://127.0.0.1:8080" ||
-		cfg.OAuth2.UIClientID != "vibecollector-ui" ||
 		cfg.OAuth2.TokenTTL != time.Hour ||
-		cfg.OAuth2.ClientSecret != "" {
+		cfg.OAuth2.RefreshTTL != 24*time.Hour {
 		t.Fatalf("oauth defaults: %+v", cfg.OAuth2)
 	}
 	if cfg.DB.Path != "vibecollector.db" ||
@@ -452,20 +490,20 @@ func TestExplicitQueueKept(t *testing.T) {
 }
 
 func TestAPIPrefixAndOAuth(t *testing.T) {
-	path := writeConfig(t, "[http]\napi_prefix = \"\"\n[oauth2]\ntoken_ttl = \"0s\"\nclient_secret = \"s3cret\"\n", 0o600)
+	path := writeConfig(t, "[http]\napi_prefix = \"\"\n[oauth2]\ntoken_ttl = \"0s\"\n", 0o600)
 	cfg, err := Load(Flags{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.APIPrefix != "/api/v1" || cfg.OAuth2.TokenTTL != time.Hour || cfg.OAuth2.RefreshTTL != 24*time.Hour || cfg.OAuth2.ClientSecret != "s3cret" {
+	if cfg.HTTP.APIPrefix != "/api/v1" || cfg.OAuth2.TokenTTL != time.Hour || cfg.OAuth2.RefreshTTL != 24*time.Hour {
 		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
 	}
-	path = writeConfig(t, "[http]\napi_prefix = \"/collector/v1\"\n[oauth2]\nissuer = \"http://collector.example\"\ntoken_ttl = \"15m\"\nui_client_id = \"ui\"\n", 0o600)
+	path = writeConfig(t, "[http]\napi_prefix = \"/collector/v1\"\n[oauth2]\nissuer = \"http://collector.example\"\ntoken_ttl = \"15m\"\n", 0o600)
 	cfg, err = Load(Flags{ConfigPath: path})
 	if err != nil {
 		t.Fatal(err)
 	}
-	if cfg.HTTP.APIPrefix != "/collector/v1" || cfg.OAuth2.Issuer != "http://collector.example" || cfg.OAuth2.TokenTTL != 15*time.Minute || cfg.OAuth2.RefreshTTL != 24*time.Hour || cfg.OAuth2.UIClientID != "ui" {
+	if cfg.HTTP.APIPrefix != "/collector/v1" || cfg.OAuth2.Issuer != "http://collector.example" || cfg.OAuth2.TokenTTL != 15*time.Minute || cfg.OAuth2.RefreshTTL != 24*time.Hour {
 		t.Fatalf("%+v %+v", cfg.HTTP, cfg.OAuth2)
 	}
 	bad := []string{

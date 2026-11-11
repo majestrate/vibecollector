@@ -1,7 +1,5 @@
-import { createHash } from "node:crypto";
 import { afterEach, expect, test, vi } from "vitest";
 import { LoginFailed, parseJSON, prefixFromSpec } from "./api";
-import { s256Challenge } from "./auth";
 import type { Filters } from "./filters";
 import { fetchGeo, FilterOutsideRaw, QueryTimeout } from "./geo/fetch";
 import { dropSession } from "./auth";
@@ -29,12 +27,6 @@ afterEach(() => {
   dropSession();
   vi.unstubAllGlobals();
   vi.restoreAllMocks();
-});
-
-test("pkce challenge is S256 of the verifier", async () => {
-  const verifier = "abcdefghijklmnopqrstuvwxyzABCDEFGHIJKLMNOPQRSTUVWXYZ0123456789-._~";
-  const want = createHash("sha256").update(verifier).digest("base64url");
-  expect(await s256Challenge(verifier)).toBe(want);
 });
 
 test("data fetch sends the bearer and does not read localStorage", async () => {
@@ -109,6 +101,19 @@ test("filter_outside_raw and query_timeout and 401 reject", async () => {
 });
 
 test("401 refreshes once and retries the GET", async () => {
+  const mem = new Map<string, string>([
+    ["vibecollector.client_id", "probe"],
+    ["vibecollector.client_secret", "s3cret"],
+  ]);
+  vi.stubGlobal("sessionStorage", {
+    getItem: (key: string) => mem.get(key) ?? null,
+    setItem: (key: string, value: string) => {
+      mem.set(key, value);
+    },
+    removeItem: (key: string) => {
+      mem.delete(key);
+    },
+  });
   rememberSession("old-access", "old-refresh");
   setAPIPrefix("/api/v1");
   const urls: string[] = [];
@@ -118,6 +123,8 @@ test("401 refreshes once and retries the GET", async () => {
       const body = String(init?.body);
       expect(body).toContain("grant_type=refresh_token");
       expect(body).toContain("refresh_token=old-refresh");
+      expect(body).toContain("client_id=probe");
+      expect(body).toContain("client_secret=s3cret");
       expect(body).not.toContain("code_verifier");
       return Response.json({
         access_token: "new-access",

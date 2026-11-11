@@ -1,10 +1,12 @@
-import { clearSession, refreshToken, rememberSession } from "./session";
+import { clearSession, clientCreds, refreshToken, rememberSession } from "./session";
+import { bytesToBase64Url, sha256 } from "./sha256";
 
-const CLIENT_ID = "vibecollector-ui";
 const REDIRECT_PATH = "/callback";
-const VERIFIER_KEY = "vibecollector.pkce_verifier";
-const STATE_KEY = "vibecollector.pkce_state";
+const CREDENTIALS_PATH = "/credentials";
 const RETURN_KEY = "vibecollector.return";
+const PKCE_VERIFIER_KEY = "vibecollector.pkce_verifier";
+const PKCE_STATE_KEY = "vibecollector.pkce_state";
+const AUTH_ERROR_KEY = "vibecollector.auth_error";
 
 let loginFlight: Promise<void> | null = null;
 let exchangeFlight: Promise<void> | null = null;
@@ -12,9 +14,9 @@ let refreshFlight: Promise<void> | null = null;
 let refreshTimer: ReturnType<typeof setTimeout> | null = null;
 
 /**
- * NeedsLogin means the refresh token could not be redeemed.
- * redirectStarted is true when the full sign-in redirect has begun.
- * message is why the redirect did not start when redirectStarted is false.
+ * NeedsLogin means the session could not be renewed.
+ * redirectStarted is true when the browser is already navigating to sign in.
+ * message is why the navigation did not start when redirectStarted is false.
  */
 export class NeedsLogin extends Error {
   readonly redirectStarted: boolean;
@@ -27,17 +29,6 @@ export class NeedsLogin extends Error {
 }
 
 /**
- * s256Challenge returns the PKCE S256 challenge for verifier.
- * verifier is the raw code_verifier string.
- * The result is base64url without padding of SHA-256(verifier).
- * It rejects when the digest cannot be computed.
- */
-export async function s256Challenge(verifier: string): Promise<string> {
-  const digest = await crypto.subtle.digest("SHA-256", new TextEncoder().encode(verifier));
-  return base64url(new Uint8Array(digest));
-}
-
-/**
  * redirectURI is the same-origin callback this shell owns.
  * The result is an absolute URL with no fragment. It throws when window is missing.
  */
@@ -47,11 +38,11 @@ export function redirectURI(): string {
 
 /**
  * rememberReturn stores the current path so login can come back to it.
- * The access token is not included. A callback URL is left unchanged.
+ * The access token is not included. The callback and credentials pages are left unchanged.
  */
 export function rememberReturn(): void {
   if (typeof window === "undefined") return;
-  if (window.location.pathname === REDIRECT_PATH) return;
+  if (window.location.pathname === REDIRECT_PATH || window.location.pathname === CREDENTIALS_PATH) return;
   const path = window.location.pathname + window.location.search;
   if (!path.startsWith("/") || path.startsWith("//")) return;
   sessionStorage.setItem(RETURN_KEY, path);
@@ -77,8 +68,9 @@ export function peekReturnSearch(): string {
 }
 
 /**
- * consumeReturn removes and returns the stored path after the code exchange.
+ * consumeReturn removes and returns the stored path after sign-in.
  * An unsafe or empty value becomes /flows. The token is never read from it.
+ * The credentials page and the callback become /flows.
  */
 export function consumeReturn(): string {
   let stored = "";
@@ -88,40 +80,92 @@ export function consumeReturn(): string {
   } catch {
     stored = "";
   }
-  if (!stored.startsWith("/") || stored.startsWith("//") || stored.includes("://") || stored.includes("code=")) {
+  if (!stored.startsWith("/") || stored.startsWith("//") || stored.includes("://") || stored.includes("code=") || stored.includes("client_secret=")) {
     return "/flows";
   }
   if (stored === "/" || stored.startsWith("/?")) {
     return "/flows" + stored.slice(1);
   }
-  if (stored === REDIRECT_PATH || stored.startsWith(REDIRECT_PATH + "?")) {
+  if (stored === REDIRECT_PATH || stored.startsWith(REDIRECT_PATH + "?") || stored === CREDENTIALS_PATH || stored.startsWith(CREDENTIALS_PATH + "?")) {
     return "/flows";
   }
   return stored;
 }
 
 /**
- * startLogin redirects the browser through the authorization-code grant.
- * The verifier and state survive the navigation in sessionStorage.
- * The access token is not stored. It rejects when the challenge cannot be built.
+ * setAuthError stores a message for the credentials form.
+ * message is shown once on that page. The client secret is not included.
+ * A missing sessionStorage drops the message.
+ */
+export function setAuthError(message: string): void {
+  if (typeof sessionStorage === "undefined") return;
+  sessionStorage.setItem(AUTH_ERROR_KEY, message);
+}
+
+/**
+ * peekAuthError reads the credentials-form message.
+ * The result is null when no message is stored. It does not remove the message.
+ */
+export function peekAuthError(): string | null {
+  if (typeof sessionStorage === "undefined") return null;
+  try {
+    const value = sessionStorage.getItem(AUTH_ERROR_KEY);
+    return value && value !== "" ? value : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * clearAuthError removes the credentials-form message.
+ * The client id and secret stay in sessionStorage.
+ */
+export function clearAuthError(): void {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.removeItem(AUTH_ERROR_KEY);
+  } catch {
+    // The form already copied the message.
+  }
+}
+
+/**
+ * openCredentials sends the browser to the client id and secret form.
+ * The current path is stored first, except on the form itself.
+ * A missing window resolves without navigating.
+ * It throws when sessionStorage rejects the return path.
+ */
+export function openCredentials(): Promise<void> {
+  if (typeof window === "undefined") return Promise.resolve();
+  rememberReturn();
+  if (window.location.pathname !== CREDENTIALS_PATH) {
+    window.location.assign(CREDENTIALS_PATH);
+  }
+  return Promise.resolve();
+}
+
+/**
+ * startLogin begins the authorization-code grant with PKCE.
+ * The page creates the verifier and the S256 challenge. The client id comes from
+ * sessionStorage. The client secret is not placed on the authorize URL.
+ * A tab with no saved pair opens the credentials form instead.
  * A missing window resolves without navigating, so unit tests can call the fetch path.
  */
 export function startLogin(): Promise<void> {
   if (typeof window === "undefined") return Promise.resolve();
   if (!loginFlight) {
-    loginFlight = runLogin().catch((err: unknown) => {
+    loginFlight = runLogin().finally(() => {
       loginFlight = null;
-      throw err;
     });
   }
   return loginFlight;
 }
 
 /**
- * finishLogin exchanges the authorization code for an access token.
+ * finishLogin exchanges the authorization code for an opaque access token and refresh token.
  * search is the callback query string, including code and state.
- * The token is kept in memory only. It rejects when state, the verifier,
- * or the token response does not check out.
+ * The tokens are kept in memory. The verifier and client secret are posted to /oauth/token.
+ * It rejects when code, state, or the token response does not check out.
  */
 export function finishLogin(search: string): Promise<void> {
   if (!exchangeFlight) {
@@ -150,21 +194,28 @@ export async function finishCallback(search: string, cancelled: () => boolean, n
 }
 
 async function runLogin(): Promise<void> {
-  const verifier = randomToken();
-  const state = randomToken();
-  sessionStorage.setItem(VERIFIER_KEY, verifier);
-  sessionStorage.setItem(STATE_KEY, state);
-  const challenge = await s256Challenge(verifier);
+  const creds = clientCreds();
+  rememberReturn();
+  if (!creds) {
+    if (window.location.pathname !== CREDENTIALS_PATH) {
+      window.location.assign(CREDENTIALS_PATH);
+    }
+    return;
+  }
+  const verifier = randomURL(32);
+  const challenge = bytesToBase64Url(await sha256(new TextEncoder().encode(verifier)));
+  const state = randomURL(16);
+  sessionStorage.setItem(PKCE_VERIFIER_KEY, verifier);
+  sessionStorage.setItem(PKCE_STATE_KEY, state);
   const q = new URLSearchParams({
     response_type: "code",
-    client_id: CLIENT_ID,
+    client_id: creds.clientId,
     redirect_uri: redirectURI(),
+    scope: "read",
     code_challenge: challenge,
     code_challenge_method: "S256",
     state,
-    scope: "read",
   });
-  rememberReturn();
   window.location.assign("/oauth/authorize?" + q.toString());
 }
 
@@ -172,42 +223,39 @@ async function runExchange(search: string): Promise<void> {
   const q = new URLSearchParams(search);
   const code = q.get("code");
   const state = q.get("state");
-  const expect = sessionStorage.getItem(STATE_KEY);
-  const verifier = sessionStorage.getItem(VERIFIER_KEY);
-  sessionStorage.removeItem(STATE_KEY);
-  sessionStorage.removeItem(VERIFIER_KEY);
-  if (!code || !state || !verifier || state !== expect) {
+  const creds = clientCreds();
+  const verifier = readItem(PKCE_VERIFIER_KEY);
+  const storedState = readItem(PKCE_STATE_KEY);
+  clearPKCE();
+  if (!code || !state || !creds || !verifier || storedState !== state) {
     throw new Error("Sign-in failed.");
   }
   const form = new URLSearchParams({
     grant_type: "authorization_code",
     code,
     redirect_uri: redirectURI(),
-    client_id: CLIENT_ID,
+    client_id: creds.clientId,
+    client_secret: creds.clientSecret,
     code_verifier: verifier,
+    state,
     scope: "read",
   });
-  const res = await fetch("/oauth/token", {
-    method: "POST",
-    headers: {
-      Accept: "application/json",
-      "Content-Type": "application/x-www-form-urlencoded",
-    },
-    body: form.toString(),
-  });
+  const res = await postToken(form);
+  if (res.status === 401) {
+    throw new Error("The client id or secret was rejected.");
+  }
   if (!res.ok) {
     throw new Error("Sign-in failed.");
   }
-  const tok: unknown = await res.json();
-  storeTokenResponse(tok);
+  storeTokenResponse(await res.json());
 }
 
 /**
  * refreshAccess trades the in-memory refresh token for a new pair.
- * Concurrent callers share one POST. The body is grant_type refresh_token.
- * It does not redo PKCE. A failure clears both tokens.
- * It throws NeedsLogin when the session is gone. redirectStarted on that
- * error means startLogin already ran.
+ * Concurrent callers share one POST. The body is grant_type refresh_token
+ * plus the client id and secret from sessionStorage.
+ * A failure clears both tokens. It throws NeedsLogin when the session is gone.
+ * redirectStarted on that error means navigation to sign-in already ran.
  */
 export function refreshAccess(): Promise<void> {
   if (!refreshFlight) {
@@ -220,12 +268,13 @@ export function refreshAccess(): Promise<void> {
 
 /**
  * dropSession forgets both tokens and cancels the refresh timer.
- * The next page load signs in from scratch.
+ * The client id and secret in sessionStorage stay. The PKCE verifier is removed.
  */
 export function dropSession(): void {
   if (refreshTimer) clearTimeout(refreshTimer);
   refreshTimer = null;
   clearSession();
+  clearPKCE();
 }
 
 function storeTokenResponse(tok: unknown): void {
@@ -254,28 +303,29 @@ function armRefresh(expiresIn: number): void {
 
 async function runRefresh(): Promise<void> {
   const current = refreshToken();
-  if (!current) {
-    throw new NeedsLogin("Sign-in failed.", false);
+  const creds = clientCreds();
+  if (!current || !creds) {
+    dropSession();
+    throw await loginAfterRefresh();
   }
   const form = new URLSearchParams({
     grant_type: "refresh_token",
     refresh_token: current,
-    client_id: CLIENT_ID,
+    client_id: creds.clientId,
+    client_secret: creds.clientSecret,
     scope: "read",
   });
   let res: Response;
   try {
-    res = await fetch("/oauth/token", {
-      method: "POST",
-      headers: {
-        Accept: "application/json",
-        "Content-Type": "application/x-www-form-urlencoded",
-      },
-      body: form.toString(),
-    });
+    res = await postToken(form);
   } catch {
     dropSession();
     throw await loginAfterRefresh();
+  }
+  if (res.status === 401) {
+    dropSession();
+    setAuthError("The client id or secret was rejected.");
+    throw await credentialsAfterFailure();
   }
   if (!res.ok) {
     dropSession();
@@ -289,6 +339,18 @@ async function runRefresh(): Promise<void> {
   }
 }
 
+async function postToken(form: URLSearchParams): Promise<Response> {
+  return fetch("/oauth/token", {
+    method: "POST",
+    credentials: "same-origin",
+    headers: {
+      Accept: "application/json",
+      "Content-Type": "application/x-www-form-urlencoded",
+    },
+    body: form.toString(),
+  });
+}
+
 async function loginAfterRefresh(): Promise<NeedsLogin> {
   try {
     await startLogin();
@@ -299,16 +361,41 @@ async function loginAfterRefresh(): Promise<NeedsLogin> {
   return new NeedsLogin("unauthorized", true);
 }
 
-function randomToken(): string {
-  const bytes = new Uint8Array(32);
-  crypto.getRandomValues(bytes);
-  return base64url(bytes);
+async function credentialsAfterFailure(): Promise<NeedsLogin> {
+  try {
+    await openCredentials();
+  } catch (err) {
+    const message = err instanceof Error ? err.message : "Sign-in failed.";
+    return new NeedsLogin(message, false);
+  }
+  return new NeedsLogin("unauthorized", true);
 }
 
-function base64url(bytes: Uint8Array): string {
-  let s = "";
-  for (const b of bytes) s += String.fromCharCode(b);
-  return btoa(s).replaceAll("+", "-").replaceAll("/", "_").replace(/=+$/, "");
+function randomURL(n: number): string {
+  const buf = new Uint8Array(n);
+  if (typeof crypto === "undefined" || typeof crypto.getRandomValues !== "function") {
+    throw new Error("Sign-in failed.");
+  }
+  crypto.getRandomValues(buf);
+  return bytesToBase64Url(buf);
+}
+
+function readItem(key: string): string {
+  try {
+    return sessionStorage.getItem(key) ?? "";
+  } catch {
+    return "";
+  }
+}
+
+function clearPKCE(): void {
+  if (typeof sessionStorage === "undefined") return;
+  try {
+    sessionStorage.removeItem(PKCE_VERIFIER_KEY);
+    sessionStorage.removeItem(PKCE_STATE_KEY);
+  } catch {
+    // The next sign-in overwrites both keys.
+  }
 }
 
 function isRecord(v: unknown): v is Record<string, unknown> {

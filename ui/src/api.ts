@@ -1,6 +1,6 @@
-import { dropSession, NeedsLogin, refreshAccess, startLogin } from "./auth";
+import { dropSession, NeedsLogin, openCredentials, refreshAccess, startLogin } from "./auth";
 import type { Filters } from "./filters";
-import { accessToken, apiPrefix, refreshToken } from "./session";
+import { accessToken, apiPrefix, clientCreds, refreshToken } from "./session";
 
 const DATA_ROUTES = ["health", "stats", "exporters", "flows", "timeseries", "talkers", "asns", "reputation", "geo"] as const;
 
@@ -155,7 +155,7 @@ async function send(
   const res = await fetch(url, { headers, redirect: "error" });
   if (res.status === 401) {
     await res.body?.cancel();
-    if (allowRefresh && refreshToken()) {
+    if (allowRefresh && refreshToken() && clientCreds()) {
       try {
         await refreshAccess();
       } catch (err) {
@@ -166,7 +166,8 @@ async function send(
     }
     dropSession();
     try {
-      await startLogin();
+      if (clientCreds()) await startLogin();
+      else await openCredentials();
     } catch (err) {
       const message = err instanceof Error ? err.message : "Sign-in failed.";
       throw new LoginFailed(message);
