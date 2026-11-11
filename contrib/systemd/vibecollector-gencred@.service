@@ -1,0 +1,9 @@
+[Unit]
+Description=Create User Credential for %I
+
+[Service]
+User=_vibecollector
+ProtectSystem=true
+StateDirectory=/var/lib/vibecollector
+ExecStart=/usr/bin/vibecollector-manage add -id %I -gen-secret
+WorkingDirectory=/var/lib/vibecollector
