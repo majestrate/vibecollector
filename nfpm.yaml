@@ -1,0 +1,70 @@
+# yaml-language-server: $schema=https://nfpm.goreleaser.com/schema.json
+# vim: set ts=2 sw=2 tw=0 fo=cnqoj
+
+name: "vibecollector"
+arch: "amd64"
+platform: "linux"
+version: "0.0.1"
+section: "default"
+priority: "extra"
+provides:
+  - vibecollector
+suggests:
+  - nfdump
+maintainer: "Jeff Becker <jeff@llarp.net>"
+description: |
+  Vibecollector: A MASSIVELY (multiplayer online?) vibe coded netflow collector with OAUTH gated REST API
+  and react+vite webui. (Read: toy project I made for myself)
+homepage: "http://vibecollector.ligma.network/"
+license: "AGPL"
+changelog: "changelog.yml"
+contents:
+  - src: ./scripts/create-system-user.sh
+    dst: /usr/libexec/vibecollector/create-system-user.sh
+    file_info:
+      mode: 0700
+      owner: root
+      group: root
+  - src: ./cmd/vibecollector
+    dst: /usr/bin/vibecollector
+  - src: ./cmd/mananage
+    dst: /usr/bin/vibecollector-manage
+  - src: ./cmd/genconf
+    dst: /usr/bin/vibecollector-genconf
+  - src: /etc/vibecollector.toml
+    dst: /var/lib/vibecollector/vibecollector.toml
+    type: symlink
+  - src: ./contrib/systemd/vibecollector.service
+    dst: /usr/lib/systemd/system/vibecollector.service
+    type: config|noreplace
+    file_info:
+      mode: 0644
+      owner: root
+      group: root
+  - src: ./contrib/systemd/vibecollector.sysusers.conf
+    dst: /usr/lib/sysusers.d/vibecollector.conf
+    type: config|noreplace
+    file_info:
+      mode: 0644
+  - src: ./contrib/systemd/vibecollector.preset
+    dst: /usr/lib/systemd/system-preset/90-vibecollector.preset
+    file_info:
+      mode: 0644
+  - src: ./contrib/systemd/vibecollector.tmpfiles.conf
+    dst: /usr/lib/tmpfiles.d/vibecollector.conf
+    file_info:
+      mode: 0644
+  - dst: /var/lib/vibecollector
+    type: dir
+    file_info:
+      mode: 0750
+overrides:
+  rpm:
+    scripts:
+      preinstall: ./scripts/rpm/preinstall.sh
+      postinstall: ./scripts/rom/postinstall.sh
+      postremove: ./scripts/rpm/postremove.sh
+  deb:
+    scripts:
+      postinstall: ./scripts/deb/postinstall.sh
+      preremove: ./scripts/deb/preremove.sh

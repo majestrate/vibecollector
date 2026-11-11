@@ -4,33 +4,38 @@ PREFIX  ?= /usr/local
 BINDIR  ?= $(PREFIX)/bin
 DESTDIR ?=
 
-OUTBINS := out/vibecollector out/vibecollector-manage out/vibecollector-genconf
+_OUT ?= out
+_BINS := $(_OUT)/vibecollector out/vibecollector-manage out/vibecollector-genconf
+
+_UI_ASSET := ui/embed_dist.go
 
 build: compile
 
-build-ui:
-	rm -fv ui/embed_dist.go
+compile-ui: $(_UI_ASSET)
+
+$(_UI_ASSET):
 	pnpm --dir ui install --frozen-lockfile
 	pnpm --dir ui build
-	cp ui/embed_dist.snippet ui/embed_dist.go
+	cp -av ui/embed_dist.snippet $(_UI_ASSET)
+	@echo compiled ui
 
-out:
-	mkdir -p out
+$(_OUT):
+	mkdir -vp $(_OUT)
 
-out/vibecollector: out
-	CGO_ENABLED=0 go build -o ./out/vibecollector ./cmd/vibecollector;
+$(_OUT)/vibecollector: $(_OUT) $(_UI_ASSET)
+	CGO_ENABLED=0 go build -o $(_OUT)/vibecollector ./cmd/vibecollector
 
-out/vibecollector-manage: out
-	CGO_ENABLED=0 go build -o ./out/vibecollector-manage ./cmd/vibecollector-clients
+$(_OUT)/vibecollector-manage: $(_OUT)
+	CGO_ENABLED=0 go build -o $(_OUT)/vibecollector-manage ./cmd/manage
 
-out/vibecollector-genconf: out
-	CGO_ENABLED=0 go build -o ./out/vibecollector-genconf ./cmd/vibecollector-config
+$(_OUT)/vibecollector-genconf: $(_OUT)
+	CGO_ENABLED=0 go build -o $(_OUT)/vibecollector-genconf ./cmd/genconf
 
-build-bins: $(OUTBINS)
-	@echo made bins
+compile-bins: $(_BINS)
+	@echo compiled bins
 
-compile: build-ui build-bins
-	@echo built
+compile: compile-ui compile-bins
+	@echo compiled
 
 
 test:
@@ -38,16 +43,17 @@ test:
 
 clean-ui:
 	pnpm --dir ui clean
+	rm -fv ui/embed_dist.go
 
 clean-bins:
-	rm -rfv out
+	rm -rfv $(_OUT)
 
 clean: clean-ui clean-bins
 	@echo cleaned
 
 install:
 	install -d $(DESTDIR)$(BINDIR)
-	install -m 755 out/vibecollector $(DESTDIR)$(BINDIR)/vibecollector
-	install -m 755 out/vibecollector-manage $(DESTDIR)$(BINDIR)/vibecollector-manage
-	install -m 755 out/vibecollector-genconf $(DESTDIR)$(BINDIR)/vibecollector-genconf
+	install -m 755 $(_OUT)/vibecollector $(DESTDIR)$(BINDIR)/vibecollector
+	install -m 755 $(_OUT)/vibecollector-manage $(DESTDIR)$(BINDIR)/vibecollector-manage
+	install -m 755 $(_OUT)/vibecollector-genconf $(DESTDIR)$(BINDIR)/vibecollector-genconf
 

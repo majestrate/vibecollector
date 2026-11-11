@@ -1,0 +1,2 @@
+# Enable vibecollector.service by default; leave everything else to distro policy.
+enable vibecollector.service
