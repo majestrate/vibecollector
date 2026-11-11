@@ -5,7 +5,9 @@
   "scripts": {
     "dev": "vite",
     "build": "tsc --noEmit && vite build",
-    "test": "vitest run"
+    "test": "vitest run",
+    "clean": "tsc --noEmit --module nodenext --target es2022 scripts/clean.ts",
+    "clean:all": "pnpm clean && rm -rf node_modules"
   },
   "dependencies": {
     "d3-geo": "3.1.2",

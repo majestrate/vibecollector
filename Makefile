@@ -11,3 +11,12 @@ build:
 
 test:
 	CGO_ENABLED=0 go test ./...
+
+clean-ui:
+	pnpm --dir ui clean
+
+clean-bins:
+	rm -fv vibecollector vibecollector-clients vibecollector-config
+
+clean: clean-ui clean-bins
+	@echo cleaned
