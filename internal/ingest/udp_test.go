@@ -11,8 +11,8 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/obs"
 )
 
 func TestNewReaderRejects(t *testing.T) {

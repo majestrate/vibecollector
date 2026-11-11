@@ -6,12 +6,12 @@ import (
 	"net/netip"
 	"time"
 
-	"vibecollector/internal/decode"
-	"vibecollector/internal/flow"
-	"vibecollector/internal/ingest"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/sampling"
-	"vibecollector/internal/sequence"
+	"github.com/majestrate/vibecollector/internal/decode"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/ingest"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/sampling"
+	"github.com/majestrate/vibecollector/internal/sequence"
 )
 
 const (

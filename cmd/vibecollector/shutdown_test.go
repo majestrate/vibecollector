@@ -7,10 +7,10 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/enrich"
-	"vibecollector/internal/flow"
-	"vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/enrich"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/obs"
 )
 
 func TestShutdownDrainsQueuedFlows(t *testing.T) {

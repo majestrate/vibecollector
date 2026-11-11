@@ -10,3 +10,5 @@ ui/test-results
 /vibecollector-config
 resume-grok-session.sh
 *.toml
+/out
+.idea

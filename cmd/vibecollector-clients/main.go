@@ -11,8 +11,8 @@ import (
 	"os"
 	"syscall"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/store"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/store"
 )
 
 func main() {

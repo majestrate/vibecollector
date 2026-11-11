@@ -11,7 +11,7 @@ import (
 
 	"golang.org/x/tools/go/packages"
 
-	"vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/config"
 )
 
 func TestNewQueryNil(t *testing.T) {
@@ -82,13 +82,13 @@ func TestFilterOutsideRaw(t *testing.T) {
 
 func TestStoreDoesNotImportNetHTTP(t *testing.T) {
 	cfg := &packages.Config{Mode: packages.NeedName | packages.NeedImports, Dir: moduleRoot(t)}
-	pkgs, err := packages.Load(cfg, "vibecollector/internal/store")
+	pkgs, err := packages.Load(cfg, "github.com/majestrate/vibecollector/internal/store")
 	if err != nil {
 		t.Fatal(err)
 	}
 	var saw bool
 	for _, p := range pkgs {
-		if p.PkgPath != "vibecollector/internal/store" {
+		if p.PkgPath != "github.com/majestrate/vibecollector/internal/store" {
 			continue
 		}
 		saw = true

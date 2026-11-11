@@ -8,7 +8,7 @@ import (
 	"os"
 	"syscall"
 
-	"vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/config"
 )
 
 func main() {

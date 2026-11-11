@@ -865,8 +865,9 @@ paths:
                 refresh_token: example-refresh-token
         "400":
           description: |
-            The grant is malformed, the code, PKCE verifier, or refresh token was rejected,
-            or `grant_type` is not `authorization_code`, `refresh_token`, or `client_credentials`.
+            The grant is malformed, or the code, PKCE verifier, or refresh token was rejected.
+            A missing or repeated `grant_type` is `invalid_request`.
+            A `grant_type` other than `authorization_code`, `refresh_token`, or `client_credentials` is `unsupported_grant_type`.
           content:
             application/json:
               schema:
@@ -2147,7 +2148,7 @@ components:
         error:
           type: string
           description: |
-            OAuth 2.0 error code, such as `invalid_request` or `invalid_grant`.
+            OAuth 2.0 error code, such as `invalid_request`, `unsupported_grant_type`, or `invalid_grant`.
         error_description:
           type: string
           description: Optional human-readable detail. Not a collector error code.

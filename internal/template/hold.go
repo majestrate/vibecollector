@@ -5,7 +5,7 @@ import (
 	"sync"
 	"time"
 
-	"vibecollector/internal/sequence"
+	"github.com/majestrate/vibecollector/internal/sequence"
 )
 
 // Pending is one copied datagram waiting on a template.

@@ -7,7 +7,7 @@ import (
 	"context"
 	"net/netip"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 // ProviderName selects one provider. The string is the stats prefix and the log line.

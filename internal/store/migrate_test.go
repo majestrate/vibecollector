@@ -7,7 +7,7 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/config"
 )
 
 func TestOpenAppliesMigrations(t *testing.T) {

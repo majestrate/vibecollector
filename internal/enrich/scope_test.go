@@ -4,7 +4,7 @@ import (
 	"net/netip"
 	"testing"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 func TestClassify(t *testing.T) {

@@ -9,7 +9,7 @@ import (
 	"strings"
 	"time"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 const (

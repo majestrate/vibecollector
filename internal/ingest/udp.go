@@ -13,8 +13,8 @@ import (
 	"syscall"
 	"time"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/obs"
 )
 
 const (

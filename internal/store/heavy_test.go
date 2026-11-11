@@ -8,8 +8,8 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/flow"
-	"vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/obs"
 )
 
 func TestTalkersAcrossBatches(t *testing.T) {

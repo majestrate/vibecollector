@@ -22,11 +22,11 @@ import (
 	"sync"
 	"time"
 
-	"vibecollector/api"
-	"vibecollector/internal/config"
-	"vibecollector/internal/decode"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/store"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/decode"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/store"
+	"github.com/majestrate/vibecollector/openapi"
 )
 
 // csp is the policy on every response from this server.
@@ -514,15 +514,27 @@ func (s *Server) handleToken(w http.ResponseWriter, r *http.Request) {
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
 		return
 	}
-	switch r.PostForm.Get("grant_type") {
+	grants := r.PostForm["grant_type"]
+	if len(grants) > 1 {
+		oauthErr(w, http.StatusBadRequest, "invalid_request")
+		return
+	}
+	grant := ""
+	if len(grants) == 1 {
+		grant = grants[0]
+	}
+	switch grant {
 	case "authorization_code":
 		s.tokenCode(w, r)
 	case "refresh_token":
 		s.tokenRefresh(w, r)
 	case "client_credentials":
 		s.tokenClient(w, r)
-	default:
+	case "":
+		// An empty value is an omitted parameter (RFC 6749 section 3.2).
 		oauthErr(w, http.StatusBadRequest, "invalid_request")
+	default:
+		oauthErr(w, http.StatusBadRequest, "unsupported_grant_type")
 	}
 }
 

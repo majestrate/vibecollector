@@ -7,12 +7,12 @@ import (
 	"sync"
 	"time"
 
-	"vibecollector/internal/flow"
-	"vibecollector/internal/ingest"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/sampling"
-	"vibecollector/internal/sequence"
-	"vibecollector/internal/template"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/ingest"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/sampling"
+	"github.com/majestrate/vibecollector/internal/sequence"
+	"github.com/majestrate/vibecollector/internal/template"
 )
 
 // exporterForget drops parser state that is not in the template, hold,

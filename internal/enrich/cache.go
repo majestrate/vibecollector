@@ -9,7 +9,7 @@ import (
 	lru "github.com/hashicorp/golang-lru/v2"
 	"golang.org/x/sync/singleflight"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 // errorTTL is the negative cache for Kind error. It is not a config key.

@@ -9,7 +9,7 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 func TestNewCacheCap(t *testing.T) {

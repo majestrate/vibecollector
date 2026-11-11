@@ -1,4 +1,4 @@
-module vibecollector
+module github.com/majestrate/vibecollector
 
 go 1.26.0
 

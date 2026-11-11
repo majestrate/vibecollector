@@ -14,7 +14,7 @@ import (
 	"sync/atomic"
 	"time"
 
-	"vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/config"
 
 	_ "modernc.org/libc" // Keep the sqlite v1.62.0 libc pin in the main module.
 	_ "modernc.org/sqlite"

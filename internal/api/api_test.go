@@ -19,10 +19,10 @@ import (
 	"time"
 	_ "time/tzdata"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/flow"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/store"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/store"
 )
 
 func TestNewServerNil(t *testing.T) {
@@ -210,6 +210,46 @@ func TestRefreshExpiredDoesNotRevokeAccess(t *testing.T) {
 	rr = call(s, http.MethodGet, s.prefix+"/health", nil, map[string]string{"Authorization": "Bearer " + access})
 	if rr.Code != http.StatusOK {
 		t.Fatal("expired refresh revoked the access token", rr.Code)
+	}
+}
+
+func TestGrantTypeErrorCode(t *testing.T) {
+	s, _ := newAPI(t, "/api/v1", "")
+	hdr := map[string]string{"Content-Type": "application/x-www-form-urlencoded"}
+	rr := call(s, http.MethodPost, "/oauth/token", strings.NewReader(""), hdr)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("missing", rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader("grant_type="), hdr)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("empty", rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader("grant_type=password&grant_type=authorization_code"), hdr)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("repeated", rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader("grant_type=authorization_code&grant_type=authorization_code"), hdr)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("repeated", rr.Code, rr.Body.String())
+	}
+	rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader("grant_type=refresh_token&grant_type=authorization_code"), hdr)
+	if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "invalid_request") {
+		t.Fatal("repeated", rr.Code, rr.Body.String())
+	}
+	for _, grant := range []string{
+		"password",
+		"implicit",
+		"PASSWORD",
+		"authorization_code ",
+		"urn:ietf:params:oauth:grant-type:jwt-bearer",
+		"ligma balls",
+	} {
+		body := url.Values{}
+		body.Set("grant_type", grant)
+		rr = call(s, http.MethodPost, "/oauth/token", strings.NewReader(body.Encode()), hdr)
+		if rr.Code != http.StatusBadRequest || !strings.Contains(rr.Body.String(), "unsupported_grant_type") {
+			t.Fatal(grant, rr.Code, rr.Body.String())
+		}
 	}
 }
 

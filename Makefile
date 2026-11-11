@@ -1,13 +1,36 @@
-.PHONY: clean build test
+.PHONY: clean compile test
 
-build:
+PREFIX  ?= /usr/local
+BINDIR  ?= $(PREFIX)/bin
+DESTDIR ?=
+
+
+
+OUTBINS := out/vibecollector out/vibecollector-manage out/vibecollector-genconf
+
+build-ui:
+	rm -fv ui/embed_dist.go
 	pnpm --dir ui install --frozen-lockfile
 	pnpm --dir ui build
 	cp ui/embed_dist.snippet ui/embed_dist.go
-	CGO_ENABLED=0 go build -o vibecollector ./cmd/vibecollector; status=$$?; rm -f ui/embed_dist.go; \
-		test $$status -eq 0 && CGO_ENABLED=0 go build -o vibecollector-clients ./cmd/vibecollector-clients && \
-		CGO_ENABLED=0 go build -o vibecollector-config ./cmd/vibecollector-config; \
-		exit $$?
+
+out:
+	mkdir -p out
+
+out/vibecollector: out
+	CGO_ENABLED=0 go build -o ./out/vibecollector ./cmd/vibecollector;
+
+out/vibecollector-manage: out
+	CGO_ENABLED=0 go build -o ./out/vibecollector-manage ./cmd/vibecollector-clients
+
+out/vibecollector-genconf: out
+	CGO_ENABLED=0 go build -o ./out/vibecollector-genconf ./cmd/vibecollector-config
+
+build-bins: $(OUTBINS)
+	@echo made bins
+
+compile: build-ui build-bins
+	@echo built
 
 test:
 	CGO_ENABLED=0 go test ./...
@@ -16,7 +39,14 @@ clean-ui:
 	pnpm --dir ui clean
 
 clean-bins:
-	rm -fv vibecollector vibecollector-clients vibecollector-config
+	rm -rfv out
 
 clean: clean-ui clean-bins
 	@echo cleaned
+
+install:
+	install -d $(DESTDIR)$(BINDIR)
+	install -m 755 out/vibecollector $(DESTDIR)$(BINDIR)/vibecollector
+	install -m 755 out/vibecollector-manage $(DESTDIR)$(BINDIR)/vibecollector-manage
+	install -m 755 out/vibecollector-genconf $(DESTDIR)$(BINDIR)/vibecollector-genconf
+

@@ -3,7 +3,7 @@ package decode
 import (
 	"time"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 // TimeFlag is how AbsMillis classified one device millisecond stamp.

@@ -6,7 +6,7 @@ import (
 	"context"
 	"net/netip"
 
-	"vibecollector/internal/enrich"
+	"github.com/majestrate/vibecollector/internal/enrich"
 )
 
 type unknownNameError struct{}

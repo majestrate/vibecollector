@@ -8,7 +8,7 @@ import (
 	"strings"
 	"testing"
 
-	"vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/config"
 )
 
 func TestPrintsDefaults(t *testing.T) {

@@ -9,15 +9,15 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/decode"
-	_ "vibecollector/internal/decode/ipfix"
-	_ "vibecollector/internal/decode/v5"
-	_ "vibecollector/internal/decode/v9"
-	"vibecollector/internal/ingest"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/sampling"
-	"vibecollector/internal/sequence"
-	"vibecollector/internal/template"
+	"github.com/majestrate/vibecollector/internal/decode"
+	_ "github.com/majestrate/vibecollector/internal/decode/ipfix"
+	_ "github.com/majestrate/vibecollector/internal/decode/v5"
+	_ "github.com/majestrate/vibecollector/internal/decode/v9"
+	"github.com/majestrate/vibecollector/internal/ingest"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/sampling"
+	"github.com/majestrate/vibecollector/internal/sequence"
+	"github.com/majestrate/vibecollector/internal/template"
 )
 
 func FuzzDispatch(f *testing.F) {

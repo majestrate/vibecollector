@@ -11,15 +11,15 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/decode/ipfix"
-	"vibecollector/internal/decode/v9"
-	"vibecollector/internal/enrich"
-	"vibecollector/internal/enrich/stub"
-	"vibecollector/internal/flow"
-	"vibecollector/internal/ingest"
-	"vibecollector/internal/obs"
-	"vibecollector/internal/template"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/decode/ipfix"
+	"github.com/majestrate/vibecollector/internal/decode/v9"
+	"github.com/majestrate/vibecollector/internal/enrich"
+	"github.com/majestrate/vibecollector/internal/enrich/stub"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/ingest"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/template"
 )
 
 func TestNewWriterRejects(t *testing.T) {

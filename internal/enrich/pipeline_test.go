@@ -9,9 +9,9 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/config"
-	"vibecollector/internal/flow"
-	"vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/config"
+	"github.com/majestrate/vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/obs"
 )
 
 type scripted struct {

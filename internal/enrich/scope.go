@@ -3,7 +3,7 @@ package enrich
 import (
 	"net/netip"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 const (

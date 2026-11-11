@@ -10,8 +10,8 @@ import (
 	"testing"
 
 	"golang.org/x/tools/go/packages"
-	"vibecollector/internal/enrich"
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/enrich"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 func TestStubNotConfigured(t *testing.T) {
@@ -42,7 +42,7 @@ func TestImportGraph(t *testing.T) {
 		Mode: packages.NeedName | packages.NeedImports,
 		Dir:  root,
 	}
-	pkgs, err := packages.Load(cfg, "vibecollector/internal/enrich/stub", "vibecollector/internal/enrich")
+	pkgs, err := packages.Load(cfg, "github.com/majestrate/vibecollector/internal/enrich/stub", "github.com/majestrate/vibecollector/internal/enrich")
 	if err != nil {
 		t.Fatal(err)
 	}
@@ -52,9 +52,9 @@ func TestImportGraph(t *testing.T) {
 			t.Errorf("%s: %v", p.PkgPath, e)
 		}
 		switch p.PkgPath {
-		case "vibecollector/internal/enrich/stub":
+		case "github.com/majestrate/vibecollector/internal/enrich/stub":
 			stubPkg = p
-		case "vibecollector/internal/enrich":
+		case "github.com/majestrate/vibecollector/internal/enrich":
 			enrichPkg = p
 		}
 	}
@@ -64,7 +64,7 @@ func TestImportGraph(t *testing.T) {
 	allowed := map[string]bool{
 		"context":                       true,
 		"net/netip":                     true,
-		"vibecollector/internal/enrich": true,
+		"github.com/majestrate/vibecollector/internal/enrich": true,
 	}
 	if len(stubPkg.Imports) != len(allowed) {
 		var paths []string
@@ -84,7 +84,7 @@ func TestImportGraph(t *testing.T) {
 		}
 	}
 	for path := range enrichPkg.Imports {
-		if path == "vibecollector/internal/enrich/stub" {
+		if path == "github.com/majestrate/vibecollector/internal/enrich/stub" {
 			t.Errorf("enrich imports stub")
 		}
 	}

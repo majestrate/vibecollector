@@ -5,7 +5,7 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/flow"
+	"github.com/majestrate/vibecollector/internal/flow"
 )
 
 func TestAbsMillisWrap(t *testing.T) {

@@ -5,10 +5,10 @@ import (
 	"testing"
 	"time"
 
-	"vibecollector/internal/obs"
-	"vibecollector/internal/sampling"
-	"vibecollector/internal/sequence"
-	"vibecollector/internal/template"
+	"github.com/majestrate/vibecollector/internal/obs"
+	"github.com/majestrate/vibecollector/internal/sampling"
+	"github.com/majestrate/vibecollector/internal/sequence"
+	"github.com/majestrate/vibecollector/internal/template"
 )
 
 func testSession(t *testing.T) (*Session, *template.Cache) {
