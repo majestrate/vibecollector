@@ -48,7 +48,7 @@ clean-ui:
 clean-bins:
 	rm -rfv $(_OUT)
 
-clean: clean-ui clean-bins
+clean: clean-ui clean-bins clean-package
 	@echo cleaned
 
 install:
@@ -57,3 +57,10 @@ install:
 	install -m 755 $(_OUT)/vibecollector-manage $(DESTDIR)$(BINDIR)/vibecollector-manage
 	install -m 755 $(_OUT)/vibecollector-genconf $(DESTDIR)$(BINDIR)/vibecollector-genconf
 
+clean-package:
+	rm -rfv dist
+
+package: compile
+	mkdir -vp dist
+	nfpm pkg --packager deb --target dist
+	nfpm pkg --packager rpm --target dist

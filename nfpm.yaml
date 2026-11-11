@@ -19,17 +19,17 @@ homepage: "http://vibecollector.ligma.network/"
 license: "AGPL"
 changelog: "changelog.yml"
 contents:
-  - src: ./scripts/create-system-user.sh
+  - src: ./contrib/scripts/create-system-user.sh
     dst: /usr/libexec/vibecollector/create-system-user.sh
     file_info:
       mode: 0700
       owner: root
       group: root
-  - src: ./cmd/vibecollector
+  - src: ./out/vibecollector
     dst: /usr/bin/vibecollector
-  - src: ./cmd/mananage
+  - src: ./out/vibecollector-manage
     dst: /usr/bin/vibecollector-manage
-  - src: ./cmd/genconf
+  - src: ./out/vibecollector-genconf
     dst: /usr/bin/vibecollector-genconf
   - src: /etc/vibecollector.toml
     dst: /var/lib/vibecollector/vibecollector.toml
@@ -61,10 +61,10 @@ contents:
 overrides:
   rpm:
     scripts:
-      preinstall: ./scripts/rpm/preinstall.sh
-      postinstall: ./scripts/rom/postinstall.sh
-      postremove: ./scripts/rpm/postremove.sh
+      preinstall: ./contrib/scripts/rpm/preinstall.sh
+      postinstall: ./contrib/scripts/rpm/postinstall.sh
+      postremove: ./contrib/scripts/rpm/postremove.sh
   deb:
     scripts:
-      postinstall: ./scripts/deb/postinstall.sh
-      preremove: ./scripts/deb/preremove.sh
+      postinstall: ./contrib/scripts/deb/postinstall.sh
+      preremove: ./contrib/scripts/deb/preremove.sh

@@ -6,9 +6,9 @@ ui/test-results
 *.db-wal
 *.db-shm
 /vibecollector
-/vibecollector-clients
-/vibecollector-config
+/vibecollector-*
 resume-grok-session.sh
 *.toml
 /out
 .idea
+/dist
