@@ -12,6 +12,7 @@ import (
 	"fmt"
 	"io/fs"
 	"log/slog"
+	"math/big"
 	"net"
 	"net/http"
 	"net/netip"
@@ -911,7 +912,100 @@ func parseFilter(r *http.Request, kind string) (store.Filter, error) {
 	if err := fillFilters(&f, q, kind); err != nil {
 		return f, err
 	}
+	if kind == "timeseries" {
+		n, unit, err := parseInterval(q.Get("interval"))
+		if err != nil {
+			return f, err
+		}
+		avg, err := parseOptionalBool(q.Get("moving_average"))
+		if err != nil {
+			return f, err
+		}
+		speed, err := parseOptionalBool(q.Get("average_speed"))
+		if err != nil {
+			return f, err
+		}
+		rms, err := parseOptionalBool(q.Get("root_mean_square"))
+		if err != nil {
+			return f, err
+		}
+		modes := 0
+		if avg {
+			modes++
+		}
+		if speed {
+			modes++
+		}
+		if rms {
+			modes++
+		}
+		if modes > 0 && n == 0 {
+			return f, errBadRange
+		}
+		if modes > 1 {
+			return f, errBadRange
+		}
+		f.IntervalN, f.IntervalUnit = n, unit
+		f.MovingAverage = avg
+		f.AverageSpeed = speed
+		f.RootMeanSquare = rms
+	}
 	return f, nil
+}
+
+// parseOptionalBool reads a timeseries switch.
+// An empty value and "false" are off. "true" is on.
+// errBadRange means the text is something else.
+func parseOptionalBool(s string) (bool, error) {
+	switch s {
+	case "", "false":
+		return false, nil
+	case "true":
+		return true, nil
+	default:
+		return false, errBadRange
+	}
+}
+
+// parseInterval reads the timeseries bucket width.
+// An empty value leaves the native grain. Otherwise the text is a count and
+// a unit: m is 1–1440 minutes, h is 1–24 hours, and d is 1–366 days.
+// The count has no leading zero. errBadRange means the text is not one of those.
+func parseInterval(s string) (int, string, error) {
+	if s == "" {
+		return 0, "", nil
+	}
+	if len(s) < 2 || s[0] < '1' || s[0] > '9' {
+		return 0, "", errBadRange
+	}
+	unit := s[len(s)-1:]
+	num := s[:len(s)-1]
+	for _, c := range num {
+		if c < '0' || c > '9' {
+			return 0, "", errBadRange
+		}
+	}
+	n, err := strconv.Atoi(num)
+	if err != nil {
+		return 0, "", errBadRange
+	}
+	switch unit {
+	case "m":
+		if n > 1440 {
+			return 0, "", errBadRange
+		}
+	case "h":
+		if n > 24 {
+			return 0, "", errBadRange
+		}
+	case "d":
+		if n > 366 {
+			return 0, "", errBadRange
+		}
+	default:
+		return 0, "", errBadRange
+	}
+	return n, unit, nil
 }
 
 func fillFilters(f *store.Filter, q url.Values, kind string) error {
@@ -1185,8 +1279,8 @@ func flowPageJSON(page store.FlowPage) map[string]any {
 
 type pointBody struct {
 	T       string `json:"t"`
-	Octets  dec    `json:"octets"`
-	Packets dec    `json:"packets"`
+	Octets  string `json:"octets"`
+	Packets string `json:"packets"`
 }
 
 type seriesBody struct {
@@ -1194,15 +1288,36 @@ type seriesBody struct {
 	Points  []pointBody `json:"points"`
 }
 
+// countText is the decimal text of a packet or octet total.
+// Nil and zero are "0".
+func countText(n *big.Int) string {
+	if n == nil || n.Sign() == 0 {
+		return "0"
+	}
+	return n.Text(10)
+}
+
 func timeseriesJSON(ts store.Timeseries) map[string]any {
 	series := make([]seriesBody, 0, len(ts.Series))
 	for _, s := range ts.Series {
 		pts := make([]pointBody, 0, len(s.Points))
 		for _, p := range s.Points {
+			octets := countText(p.Octets)
+			packets := countText(p.Packets)
+			if ts.AverageSpeed {
+				octets = p.OctetRate
+				packets = p.PacketRate
+				if octets == "" {
+					octets = "0"
+				}
+				if packets == "" {
+					packets = "0"
+				}
+			}
 			pts = append(pts, pointBody{
 				T:       p.T.UTC().Format(time.RFC3339),
-				Octets:  dec(p.Octets),
-				Packets: dec(p.Packets),
+				Octets:  octets,
+				Packets: packets,
 			})
 		}
 		series = append(series, seriesBody{Sampled: s.Sampled, Points: pts})
@@ -1211,6 +1326,9 @@ func timeseriesJSON(ts store.Timeseries) map[string]any {
 	return map[string]any{
 		"source":            ts.Source,
 		"grain":             ts.Grain,
+		"moving_average":    ts.MovingAverage,
+		"average_speed":     ts.AverageSpeed,
+		"root_mean_square":  ts.RootMeanSquare,
 		"start":             rg.Start,
 		"end":               rg.End,
 		"tz":                rg.TZ,

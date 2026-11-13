@@ -1454,6 +1454,145 @@ func mustJSON(t *testing.T, b []byte) map[string]any {
 	return m
 }
 
+func TestTimeseriesInterval(t *testing.T) {
+	s, db := newAPI(t, "/api/v1", "s3cret")
+	start := time.Now().UTC().Truncate(5 * time.Minute).Add(-10 * time.Minute)
+	end := start.Add(15 * time.Minute)
+	n100 := uint32(100)
+	flows := []flow.Flow{
+		flowAt(start.Add(time.Minute), "203.0.113.5", "198.51.100.9", 443, 10, 1000, false, nil, "US", "DE", ""),
+		flowAt(start.Add(3*time.Minute), "203.0.113.6", "198.51.100.10", 443, 2, 4, false, nil, "US", "DE", ""),
+		flowAt(start.Add(7*time.Minute), "203.0.113.8", "198.51.100.8", 53, 3, 8, true, &n100, "US", "DE", ""),
+	}
+	writeFlows(t, db, s.q, flows, start, end)
+	tok := clientToken(t, s, "s3cret")
+	auth := map[string]string{"Authorization": "Bearer " + tok}
+	win := "start=" + url.QueryEscape(start.Format(time.RFC3339)) + "&end=" + url.QueryEscape(end.Format(time.RFC3339))
+
+	ts := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=5m", nil, auth).Body.Bytes())
+	if ts["grain"] != "5m" {
+		t.Fatal(ts["grain"])
+	}
+	bySampled := map[bool][]any{}
+	for _, item := range ts["series"].([]any) {
+		row := item.(map[string]any)
+		bySampled[row["sampled"].(bool)] = row["points"].([]any)
+	}
+	unsampled := bySampled[false]
+	sampled := bySampled[true]
+	if len(unsampled) != 3 || len(sampled) != 3 {
+		t.Fatalf("points %d %d", len(unsampled), len(sampled))
+	}
+	if unsampled[0].(map[string]any)["t"] != start.Format(time.RFC3339) || unsampled[0].(map[string]any)["octets"] != "1004" || unsampled[0].(map[string]any)["packets"] != "12" {
+		t.Fatal(unsampled[0])
+	}
+	if unsampled[2].(map[string]any)["octets"] != "0" || sampled[1].(map[string]any)["octets"] != "8" || sampled[0].(map[string]any)["octets"] != "0" {
+		t.Fatal(unsampled[2], sampled[0], sampled[1])
+	}
+
+	bad := call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=48h", nil, auth)
+	if bad.Code != http.StatusBadRequest || mustJSON(t, bad.Body.Bytes())["error"] != "bad_range" {
+		t.Fatal(bad.Code, bad.Body.String())
+	}
+
+	avg := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=5m&moving_average=true", nil, auth).Body.Bytes())
+	if avg["moving_average"] != true || avg["average_speed"] != false || avg["root_mean_square"] != false || avg["grain"] != "5m" {
+		t.Fatal(avg["moving_average"], avg["average_speed"], avg["root_mean_square"], avg["grain"])
+	}
+	for _, item := range avg["series"].([]any) {
+		row := item.(map[string]any)
+		points := row["points"].([]any)
+		if !row["sampled"].(bool) {
+			if points[0].(map[string]any)["octets"] != "201" || points[0].(map[string]any)["packets"] != "2" {
+				t.Fatal(points[0])
+			}
+			continue
+		}
+		if points[1].(map[string]any)["octets"] != "2" || points[1].(map[string]any)["packets"] != "1" {
+			t.Fatal(points[1])
+		}
+	}
+	off := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=5m&moving_average=false", nil, auth).Body.Bytes())
+	if off["moving_average"] != false {
+		t.Fatal(off["moving_average"])
+	}
+	for _, item := range off["series"].([]any) {
+		row := item.(map[string]any)
+		if row["sampled"].(bool) {
+			continue
+		}
+		if row["points"].([]any)[0].(map[string]any)["octets"] != "1004" {
+			t.Fatal(row["points"])
+		}
+	}
+	spd := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=5m&average_speed=true", nil, auth).Body.Bytes())
+	if spd["average_speed"] != true || spd["moving_average"] != false || spd["root_mean_square"] != false || spd["grain"] != "5m" {
+		t.Fatal(spd["average_speed"], spd["moving_average"], spd["root_mean_square"], spd["grain"])
+	}
+	for _, item := range spd["series"].([]any) {
+		row := item.(map[string]any)
+		points := row["points"].([]any)
+		if !row["sampled"].(bool) {
+			if points[0].(map[string]any)["octets"] != "3.347" || points[0].(map[string]any)["packets"] != "0.04" {
+				t.Fatal(points[0])
+			}
+			continue
+		}
+		if points[1].(map[string]any)["octets"] != "0.027" || points[1].(map[string]any)["packets"] != "0.01" {
+			t.Fatal(points[1])
+		}
+	}
+	rms := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win+"&interval=5m&root_mean_square=true", nil, auth).Body.Bytes())
+	if rms["root_mean_square"] != true || rms["moving_average"] != false || rms["average_speed"] != false || rms["grain"] != "5m" {
+		t.Fatal(rms["root_mean_square"], rms["moving_average"], rms["average_speed"], rms["grain"])
+	}
+	for _, item := range rms["series"].([]any) {
+		row := item.(map[string]any)
+		points := row["points"].([]any)
+		if !row["sampled"].(bool) {
+			if points[0].(map[string]any)["octets"] != "447" || points[0].(map[string]any)["packets"] != "5" {
+				t.Fatal(points[0])
+			}
+			continue
+		}
+		if points[1].(map[string]any)["octets"] != "4" || points[1].(map[string]any)["packets"] != "1" {
+			t.Fatal(points[1])
+		}
+	}
+	for _, raw := range []string{
+		win + "&moving_average=true",
+		win + "&interval=5m&moving_average=yes",
+		win + "&average_speed=true",
+		win + "&interval=5m&average_speed=yes",
+		win + "&interval=5m&moving_average=true&average_speed=true",
+		win + "&root_mean_square=true",
+		win + "&interval=5m&root_mean_square=yes",
+		win + "&interval=5m&moving_average=true&root_mean_square=true",
+		win + "&interval=5m&average_speed=true&root_mean_square=true",
+		win + "&interval=5m&moving_average=true&average_speed=true&root_mean_square=true",
+	} {
+		res := call(s, http.MethodGet, s.prefix+"/timeseries?"+raw, nil, auth)
+		if res.Code != http.StatusBadRequest || mustJSON(t, res.Body.Bytes())["error"] != "bad_range" {
+			t.Fatal(raw, res.Code, res.Body.String())
+		}
+	}
+
+	plain := mustJSON(t, call(s, http.MethodGet, s.prefix+"/timeseries?"+win, nil, auth).Body.Bytes())
+	if plain["grain"] != "1m" || plain["moving_average"] != false || plain["average_speed"] != false || plain["root_mean_square"] != false {
+		t.Fatal(plain["grain"], plain["moving_average"], plain["average_speed"], plain["root_mean_square"])
+	}
+	for _, item := range plain["series"].([]any) {
+		row := item.(map[string]any)
+		points := row["points"].([]any)
+		if row["sampled"].(bool) && len(points) != 1 {
+			t.Fatal(points)
+		}
+		if !row["sampled"].(bool) && len(points) != 2 {
+			t.Fatal(points)
+		}
+	}
+}
+
 func writeFlows(t *testing.T, db *store.DB, q *store.Query, flows []flow.Flow, start, end time.Time) {
 	t.Helper()
 	w, err := store.NewWriter(db, config.DB{BatchSize: 1}, obs.NewCounters())

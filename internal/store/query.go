@@ -6,6 +6,7 @@ import (
 	"encoding/base64"
 	"errors"
 	"fmt"
+	"math/big"
 	"net/netip"
 	"strconv"
 	"strings"
@@ -22,6 +23,13 @@ import (
 // rollup route. The flows fallback and the flows route bind all three.
 // Reputation on the reputation route is category equality. On the flows
 // route the same string is a case-sensitive substring. There is no second flag.
+// IntervalN and IntervalUnit quantize timeseries samples. Other routes ignore
+// them. A zero N with an empty unit keeps the native grain.
+// MovingAverage replaces each quantized bucket with the rounded mean of the
+// native samples inside it. AverageSpeed replaces each bucket with octets per
+// second and packets per second. RootMeanSquare replaces each bucket with the
+// square root of the mean square of those samples. Each requires an interval.
+// Other routes ignore them. More than one of them is ErrBadFilter.
 type Filter struct {
 	Start, End time.Time
 	TZ         string
@@ -39,6 +47,30 @@ type Filter struct {
 	By         string
 	Limit      int
 	Cursor     string
+	// IntervalN is the timeseries bucket count. Zero means the native grain.
+	// IntervalUnit is "m", "h", or "d" when IntervalN is set, and empty otherwise.
+	// Minutes are 1–1440 and hours are 1–24, aligned to local midnight in TZ.
+	// Days are 1–366 civil days in TZ, grouped from 1970-01-01.
+	IntervalN    int
+	IntervalUnit string
+	// MovingAverage is the timeseries mean inside each quantized bucket.
+	// Empty native slots in the bucket count as zero. The mean rounds to the
+	// nearest integer, and a half rounds up. It is false when the points stay
+	// sums. True with an unset interval is ErrBadFilter.
+	MovingAverage bool
+	// AverageSpeed is the timeseries rate over each quantized bucket.
+	// Octets and packets are divided by the bucket's overlap with the window.
+	// The rate rounds to the nearest thousandth, and a half rounds up.
+	// True with an unset interval, or together with MovingAverage or
+	// RootMeanSquare, is ErrBadFilter.
+	AverageSpeed bool
+	// RootMeanSquare is the timeseries root mean square inside each quantized bucket.
+	// Each native sample is squared. Empty slots in the overlap of the bucket and
+	// the requested window count as zero. The square root of that mean rounds to
+	// the nearest integer, and a half rounds up.
+	// True with an unset interval, or together with MovingAverage or AverageSpeed,
+	// is ErrBadFilter.
+	RootMeanSquare bool
 
 	// noProtocol is the timeseries sentinel ip_proto -1.
 	// *uint8 cannot store it. SetNoProtocol sets this and clears Proto.
@@ -146,12 +178,23 @@ type FlowRow struct {
 }
 
 // Timeseries is sampled and unsampled traffic as separate series.
-// Source is "rollup" or "flows". Grain is "1m" or "1h".
+// Source is "rollup" or "flows". Grain is the summed bucket width.
+// It is "1m" or "1h" when the request left the interval unset, and the
+// requested width otherwise. A request finer than the native grain is
+// reported as that grain.
+// MovingAverage is true when each point is the rounded mean of the native
+// samples inside its bucket. AverageSpeed is true when OctetRate and
+// PacketRate are octets per second and packets per second. RootMeanSquare
+// is true when each point is the rounded root mean square of those samples.
+// All three false means each point is the bucket sum.
 type Timeseries struct {
 	Range
-	Source string
-	Grain  string
-	Series []Series
+	Source         string
+	Grain          string
+	MovingAverage  bool
+	AverageSpeed   bool
+	RootMeanSquare bool
+	Series         []Series
 }
 
 // Series is one sampled value. Points are ordered by time.
@@ -160,10 +203,17 @@ type Series struct {
 	Points  []Point
 }
 
-// Point is one bucket. Octets and Packets are exported totals, not estimates.
+// Point is one bucket. Octets and Packets are the bucket sum, the rounded
+// mean, or the rounded root mean square. They are exported counts, not
+// estimates, and they are not multiplied by the sampling interval.
+// Nil means zero. OctetRate and PacketRate are set when the timeseries
+// average speed is on. They are decimal octets per second and packets per
+// second, with at most three fractional digits. Empty means Octets and
+// Packets are the values.
 type Point struct {
-	T               time.Time
-	Octets, Packets uint64
+	T                     time.Time
+	Octets, Packets       *big.Int
+	OctetRate, PacketRate string
 }
 
 // Talkers is one direction, ranked by octets.
@@ -352,6 +402,19 @@ func (q *Query) Flows(ctx context.Context, f Filter) (FlowPage, error) {
 // unsupported filter aggregates flows when f.Start is inside raw retention
 // and sets Source to "flows". Otherwise it returns FilterError. It does not
 // add the two series together and it does not multiply by N.
+// IntervalN and IntervalUnit sum those samples into civil buckets in f.TZ.
+// An unset interval keeps the native grain and omits empty buckets.
+// A set interval includes a zero point for every bucket in the window when
+// any sample matched. A width finer than the native grain uses that grain.
+// MovingAverage then replaces each bucket with the rounded mean of the native
+// samples inside it. Empty native slots count as zero. A half rounds up.
+// AverageSpeed instead replaces each bucket with octets per second and packets
+// per second over the bucket's overlap with the window, rounded to the nearest
+// thousandth. RootMeanSquare instead replaces each bucket with the square root
+// of the mean square of the native samples inside it, rounded to the nearest
+// integer. Any of these with an unset interval is ErrBadFilter, as is more
+// than one of them together.
+// ErrBadFilter means the interval cannot be applied.
 // A canceled ctx returns ErrQueryTimeout. Any other failure is the database error.
 func (q *Query) Timeseries(ctx context.Context, f Filter) (Timeseries, error) {
 	out := Timeseries{Range: echoRange(f), Series: []Series{}}
@@ -751,8 +814,7 @@ func (q *Query) timeseriesRollup(ctx context.Context, f Filter, out Timeseries) 
 	if err != nil {
 		return out, err
 	}
-	out.Series = seriesFrom(pts, f.Sampled)
-	return out, nil
+	return finishTimeseries(out, f, pts)
 }
 
 func (q *Query) timeseriesFlows(ctx context.Context, f Filter, out Timeseries) (Timeseries, error) {
@@ -764,7 +826,22 @@ func (q *Query) timeseriesFlows(ctx context.Context, f Filter, out Timeseries) (
 	if err != nil {
 		return out, err
 	}
-	out.Series = seriesFrom(pts, f.Sampled)
+	return finishTimeseries(out, f, pts)
+}
+
+// finishTimeseries quantizes pts and records which bucket computation was applied.
+// f is the request. out.Grain is the native grain the quantizer may raise.
+// MovingAverage, AverageSpeed, and RootMeanSquare are false when the points stay sums.
+// ErrBadFilter means the interval or the requested computation cannot be applied.
+func finishTimeseries(out Timeseries, f Filter, pts []pt) (Timeseries, error) {
+	var err error
+	out.Series, out.Grain, err = quantizeSeries(pts, f, out.Grain)
+	if err != nil {
+		return out, err
+	}
+	out.MovingAverage = f.MovingAverage
+	out.AverageSpeed = f.AverageSpeed
+	out.RootMeanSquare = f.RootMeanSquare
 	return out, nil
 }
 
@@ -773,6 +850,11 @@ type pt struct {
 	sampled bool
 	octets  uint64
 	packets uint64
+}
+
+// u64Count is n as an arbitrary-precision count.
+func u64Count(n uint64) *big.Int {
+	return new(big.Int).SetUint64(n)
 }
 
 func (q *Query) scanPoints(ctx context.Context, qs string, args ...any) ([]pt, error) {
@@ -800,7 +882,7 @@ func seriesFrom(pts []pt, sampled *bool) []Series {
 		s := Series{Sampled: want, Points: []Point{}}
 		for _, p := range pts {
 			if p.sampled == want {
-				s.Points = append(s.Points, Point{T: p.t, Octets: p.octets, Packets: p.packets})
+				s.Points = append(s.Points, Point{T: p.t, Octets: u64Count(p.octets), Packets: u64Count(p.packets)})
 			}
 		}
 		return s

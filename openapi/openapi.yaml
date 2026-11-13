@@ -329,8 +329,30 @@ paths:
 
         Without `sampled`, `series` has both values.
         With `sampled=true` or `sampled=false`, `series` has that one value.
-        `grain` is `1m` when the range is at most 7 days, and `1h` when a rollup range is longer.
-        A `source` of `flows` stays at `1m`.
+        `interval` sums each native sample into a civil bucket in `tz`.
+        `Nm` is 1 to 1440 minutes and `Nh` is 1 to 24 hours, both aligned to local midnight.
+        A repeated clock time stays in the bucket that contains that occurrence.
+        `Nd` is 1 to 366 civil days, grouped from 1970-01-01.
+        The response `grain` is the width that was summed.
+        A width finer than the native grain is raised to that grain.
+        Omitted, `grain` is `1m` when the range is at most 7 days, and `1h` when a rollup range is longer,
+        and empty buckets are left out.
+        A `source` of `flows` has a native grain of `1m`.
+        When `interval` is set and any sample matched, every bucket in the window is present, with `0` where that series had none.
+        `moving_average=true` replaces each of those buckets with the average of the native samples inside it.
+        Empty native slots in the bucket and inside the requested window count as zero.
+        The average rounds to the nearest integer, and a half rounds up.
+        `moving_average` requires `interval`. Without it the response is 400 `bad_range`.
+        `average_speed=true` replaces each bucket with octets per second and packets per second.
+        The duration is the overlap of the bucket and the requested window.
+        The rate rounds to the nearest thousandth, and a half rounds up.
+        `average_speed` requires `interval`. Without it the response is 400 `bad_range`.
+        `root_mean_square=true` replaces each bucket with the square root of the mean square of the native samples inside it.
+        Empty native slots in the bucket and inside the requested window count as zero.
+        The result rounds to the nearest integer, and a half rounds up.
+        `root_mean_square` requires `interval`. Without it the response is 400 `bad_range`.
+        More than one of `moving_average`, `average_speed`, and `root_mean_square` set to `true` is 400 `bad_range`.
+        Omitted or `false`, each bucket stays the sum.
         A read that exceeds 5 seconds is 503 `query_timeout`, not a partial body and not the unfiltered rollup.
       security: [{ oauth2: [read] }]
       parameters:
@@ -349,6 +371,10 @@ paths:
         - $ref: "#/components/parameters/Asn"
         - $ref: "#/components/parameters/Reputation"
         - $ref: "#/components/parameters/Sampled"
+        - $ref: "#/components/parameters/Interval"
+        - $ref: "#/components/parameters/MovingAverage"
+        - $ref: "#/components/parameters/AverageSpeed"
+        - $ref: "#/components/parameters/RootMeanSquare"
         - $ref: "#/components/parameters/CacheControl"
       responses:
         "200":
@@ -360,6 +386,9 @@ paths:
               example:
                 source: rollup
                 grain: 1m
+                moving_average: false
+                average_speed: false
+                root_mean_square: false
                 start: "2026-11-09T12:00:00Z"
                 end: "2026-11-09T13:00:00Z"
                 tz: UTC
@@ -1105,6 +1134,73 @@ components:
         Native on timeseries and flows. Unsupported on talkers, ASNs, reputation, and geo.
       schema:
         type: boolean
+    Interval:
+      name: interval
+      in: query
+      required: false
+      description: |
+        Timeseries only. Width of each summed bucket.
+        `Nm` is 1 to 1440 minutes, `Nh` is 1 to 24 hours, and `Nd` is 1 to 366 civil days.
+        The count has no leading zero.
+        Minutes and hours align to local midnight in `tz`.
+        A repeated clock time stays in the bucket that contains that occurrence.
+        Days align to local midnights, grouped from 1970-01-01.
+        Omitted, the route keeps the native grain and omits empty buckets.
+        A width finer than the native grain is raised to that grain.
+        The response `grain` is the width that was summed.
+        Other routes ignore this parameter.
+        An unparseable value on timeseries is 400 `bad_range`.
+      schema:
+        type: string
+        pattern: "^[1-9][0-9]{0,3}(m|h|d)$"
+        example: 15m
+    MovingAverage:
+      name: moving_average
+      in: query
+      required: false
+      description: |
+        Timeseries only. `true` replaces each quantized bucket with the average
+        of the native samples inside it.
+        Empty native slots inside the bucket and inside the requested window count as zero.
+        The average rounds to the nearest integer, and a half rounds up.
+        It requires `interval`. Without `interval` the response is 400 `bad_range`.
+        Together with `average_speed=true` or `root_mean_square=true` the response is 400 `bad_range`.
+        Omitted or `false` keeps the bucket sums.
+        Other routes ignore this parameter.
+        A value other than `true` or `false` on timeseries is 400 `bad_range`.
+      schema:
+        type: boolean
+    AverageSpeed:
+      name: average_speed
+      in: query
+      required: false
+      description: |
+        Timeseries only. `true` replaces each quantized bucket with octets per second and packets per second.
+        The duration is the overlap of the bucket and the requested window.
+        The rate rounds to the nearest thousandth, and a half rounds up.
+        It requires `interval`. Without `interval` the response is 400 `bad_range`.
+        Together with `moving_average=true` or `root_mean_square=true` the response is 400 `bad_range`.
+        Omitted or `false` keeps the bucket sums.
+        Other routes ignore this parameter.
+        A value other than `true` or `false` on timeseries is 400 `bad_range`.
+      schema:
+        type: boolean
+    RootMeanSquare:
+      name: root_mean_square
+      in: query
+      required: false
+      description: |
+        Timeseries only. `true` replaces each quantized bucket with the square root
+        of the mean square of the native samples inside it.
+        Empty native slots inside the bucket and inside the requested window count as zero.
+        The result rounds to the nearest integer, and a half rounds up.
+        It requires `interval`. Without `interval` the response is 400 `bad_range`.
+        Together with `moving_average=true` or `average_speed=true` the response is 400 `bad_range`.
+        Omitted or `false` keeps the bucket sums.
+        Other routes ignore this parameter.
+        A value other than `true` or `false` on timeseries is 400 `bad_range`.
+      schema:
+        type: boolean
     By:
       name: by
       in: query
@@ -1709,16 +1805,34 @@ components:
     Timeseries:
       type: object
       additionalProperties: false
-      required: [source, grain, start, end, tz, boundary_adjusted, series]
+      required: [source, grain, moving_average, average_speed, root_mean_square, start, end, tz, boundary_adjusted, series]
       properties:
         source:
           $ref: "#/components/schemas/Source"
         grain:
           type: string
-          enum: ["1m", "1h"]
+          pattern: "^[1-9][0-9]{0,3}(m|h|d)$"
           description: |
-            `1m` when the range is at most 7 days, and whenever `source` is `flows`.
+            Bucket width that was summed.
+            `1m` or `1h` when `interval` is omitted.
+            `1m` when the range is at most 7 days and whenever `source` is `flows`.
             `1h` when a rollup range is longer than 7 days.
+            Otherwise the requested `interval`, or the native grain when the request was finer.
+        moving_average:
+          type: boolean
+          description: |
+            True when each point is the rounded average of the native samples inside its bucket.
+            False when each point is the bucket sum, the average speed, or the root mean square.
+        average_speed:
+          type: boolean
+          description: |
+            True when each point is octets per second and packets per second over its bucket.
+            False when each point is the bucket sum, the moving average, or the root mean square.
+        root_mean_square:
+          type: boolean
+          description: |
+            True when each point is the rounded root mean square of the native samples inside its bucket.
+            False when each point is the bucket sum, the moving average, or the average speed.
         start:
           type: string
           format: date-time
@@ -1759,9 +1873,21 @@ components:
           format: date-time
           description: Bucket start, RFC 3339 UTC.
         octets:
-          $ref: "#/components/schemas/DecimalCount"
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,3})?$"
+          description: |
+            Bucket octet total, the rounded mean, the rounded root mean square, or octets per second when `average_speed` is true.
+            A rate may have up to three decimal places.
+            A string, not a JSON number. Not multiplied by the sampling interval.
+          example: "1000"
         packets:
-          $ref: "#/components/schemas/DecimalCount"
+          type: string
+          pattern: "^[0-9]+(\\.[0-9]{1,3})?$"
+          description: |
+            Bucket packet total, the rounded mean, the rounded root mean square, or packets per second when `average_speed` is true.
+            A rate may have up to three decimal places.
+            A string, not a JSON number. Not multiplied by the sampling interval.
+          example: "10"
     Talkers:
       type: object
       additionalProperties: false

@@ -2744,12 +2744,15 @@ The route does not drop the filter and serve the rollup. Long-range filtered cha
 
 When `start` is older than raw retention, `/api/v1/flows` returns **200** with `"flows": []`, `raw_available_from`, and `"truncated": true`.
 
-`/api/v1/timeseries`. Without a `sampled` filter the body has both series. With `sampled=true` or `sampled=false` it has that one series. `grain` is `1m` when the range is ≤ 7 days, and `1h` when a rollup range is longer. A `source: "flows"` answer stays at `1m` because raw retention is 6 hours. Values are exported octets and packets. They are not estimates and they are not multiplied by N.
+`/api/v1/timeseries`. Without a `sampled` filter the body has both series. With `sampled=true` or `sampled=false` it has that one series. `grain` is `1m` when the range is ≤ 7 days, and `1h` when a rollup range is longer. A `source: "flows"` answer stays at `1m` because raw retention is 6 hours. `interval` (`Nm`, `Nh`, or `Nd`) sums those native samples into civil buckets in `tz`. Minutes and hours align to local midnight. Days are civil days grouped from 1970-01-01. A width finer than the native grain is raised to that grain, and `grain` reports the width that was summed. A set interval includes a zero point for every bucket in the window when any sample matched. `moving_average=true` replaces each bucket with the average of the native samples inside it. Empty native slots in the bucket and inside the requested window count as zero. The average rounds to the nearest integer, and a half rounds up. The flag requires `interval`; without it the response is 400 `bad_range`. `average_speed=true` replaces each bucket with octets per second and packets per second. The duration is the overlap of the bucket and the requested window. The rate rounds to the nearest thousandth, and a half rounds up. It requires `interval`. `root_mean_square=true` replaces each bucket with the square root of the mean square of the native samples inside it. Empty native slots count as zero. The result rounds to the nearest integer, and a half rounds up. It requires `interval`. More than one of the three flags is 400 `bad_range`. The body fields `moving_average`, `average_speed`, and `root_mean_square` report which computation ran. Values are exported octets and packets, that rounded mean, that rounded root mean square, or that rate. They are not estimates and they are not multiplied by N.
 
 ```json
 {
   "source": "rollup",
   "grain": "1m",
+  "moving_average": false,
+  "average_speed": false,
+  "root_mean_square": false,
   "start": "2026-11-09T12:00:00Z",
   "end": "2026-11-09T13:00:00Z",
   "tz": "UTC",

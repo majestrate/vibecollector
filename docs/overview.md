@@ -41,7 +41,7 @@ The web UI is a React application for exploring the collected data. Every view u
 The views are:
 
 - a filterable table of flows
-- traffic volume over time
+- traffic volume over time, summed by the server into an interval set on that page. Checkboxes on that page ask the server for the average of the native samples inside each interval, for octets per second and packets per second over the bucket length, or for the root mean square of the native samples inside each interval
 - top talkers
 - an ASN breakdown
 - reputation hits

@@ -150,6 +150,20 @@ td {
   background: #fff;
 }
 
+.interval input {
+  width: 5rem;
+}
+
+.interval .check {
+  flex-direction: row;
+  align-items: center;
+  gap: 0.35rem;
+}
+
+.interval .check input {
+  width: auto;
+}
+
 .map {
   background: #e7eef5;
 }
