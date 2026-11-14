@@ -127,6 +127,86 @@ func ResolveSysUp(received time.Time, exportUnix, exportNsec, sysUpTime, first, 
 	return stamp
 }
 
+// AbsoluteMS is one flow endpoint taken from a v9 absolute time element.
+// Set is true when that end carried flowStartMilliseconds (152),
+// flowEndMilliseconds (153), flowStartSeconds (150), or flowEndSeconds (151).
+// Milliseconds win over seconds. MS is Unix milliseconds.
+// A millisecond value that does not fit in an int64 is not Set.
+// The zero AbsoluteMS means the element was absent.
+type AbsoluteMS struct {
+	Set bool
+	MS  int64
+}
+
+// ResolveV9 converts one v9 record's first and last times.
+// received is the collector clock and the clamp window's anchor.
+// exportUnix is the header export clock in seconds. v9 has no nanoseconds.
+// sysUpTime, first, and last are device milliseconds from the header and
+// from FIRST_SWITCHED (22) and LAST_SWITCHED (21). hasFirst and hasLast are
+// false when that switched field was absent.
+// absStart and absEnd are the absolute Unix times for each end. When Set,
+// that end uses MS and the switched field for that end is ignored.
+// maxAge and skew are timestamp_max_age and timestamp_skew_slack.
+// When neither absolute end is Set, the result is ResolveSysUp.
+// When either end is Set, Source is flow.TimeAbsolute. A missing absolute
+// end still uses ResolveSysUp's rule for that end: the switched field when
+// it is present and exportUnix is not 0, otherwise the export time, or
+// received when exportUnix is 0. When both ends that were actually present
+// have End before Start, they are swapped and Suspect increases by one.
+// A switched field that was ignored because the absolute element was Set
+// does not add Skew or Suspect. Both ends are then clamped into
+// [received - maxAge, received + skew].
+// Export is the header time, or the Unix epoch when exportUnix is 0.
+// The result is the stamp to store. ResolveV9 does not return an error.
+func ResolveV9(received time.Time, exportUnix, sysUpTime, first, last uint32, hasFirst, hasLast bool, absStart, absEnd AbsoluteMS, maxAge, skew time.Duration) Stamp {
+	if !absStart.Set && !absEnd.Set {
+		return ResolveSysUp(received, exportUnix, 0, sysUpTime, first, last, hasFirst, hasLast, maxAge, skew)
+	}
+	export := time.Unix(int64(exportUnix), 0).UTC()
+	start, end := export, export
+	if exportUnix == 0 {
+		start, end = received, received
+	}
+	var stamp Stamp
+	stamp.Export = export
+	stamp.Source = flow.TimeAbsolute
+	realS, realE := false, false
+	if absStart.Set {
+		start = time.UnixMilli(absStart.MS).UTC()
+		realS = true
+	} else if exportUnix != 0 && hasFirst {
+		var flag TimeFlag
+		start, flag = AbsMillis(export, sysUpTime, first, maxAge, skew)
+		stamp.Skew += flagCount(flag, FlagSkew)
+		stamp.Suspect += flagCount(flag, FlagSuspect)
+		realS = true
+	}
+	if absEnd.Set {
+		end = time.UnixMilli(absEnd.MS).UTC()
+		realE = true
+	} else if exportUnix != 0 && hasLast {
+		var flag TimeFlag
+		end, flag = AbsMillis(export, sysUpTime, last, maxAge, skew)
+		stamp.Skew += flagCount(flag, FlagSkew)
+		stamp.Suspect += flagCount(flag, FlagSuspect)
+		realE = true
+	}
+	if realS && realE && end.Before(start) {
+		start, end = end, start
+		stamp.Suspect++
+	}
+	var movedS, movedE bool
+	start, movedS = clampInstant(start, received, maxAge, skew)
+	end, movedE = clampInstant(end, received, maxAge, skew)
+	stamp.Start = start
+	stamp.End = end
+	stamp.ClockClamped = movedS || movedE
+	if stamp.ClockClamped {
+		stamp.Clamped = 1
+	}
+	return stamp
+}
+
 func flagCount(got, want TimeFlag) uint64 {
 	if got == want {
 		return 1

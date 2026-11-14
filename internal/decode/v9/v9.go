@@ -61,7 +61,13 @@ const (
 // and malformed are not incremented again for a set already counted on first
 // sight, and the v9 cursor is not moved again.
 // maxAge and skew are timestamp_max_age and timestamp_skew_slack. They are
-// passed to ResolveSysUp. Zero is not replaced with a default.
+// passed to ResolveV9. Zero is not replaced with a default.
+// FIRST_SWITCHED (22) and LAST_SWITCHED (21) are sysUpTime milliseconds.
+// flowStartMilliseconds (152) and flowEndMilliseconds (153) are Unix
+// milliseconds in network byte order and win over 22 and 21 for that end.
+// flowStartSeconds (150) and flowEndSeconds (151) are used for an end that
+// has no millisecond element. A record with either absolute end has
+// time_source absolute. The receive-window clamp still applies after that.
 // Framing walks each FlowSet Length until the payload is consumed. Count is
 // the record total from RFC 3954 §5.1, not a FlowSet loop bound. A Count that
 // disagrees with template records + options template records + data records +
@@ -528,7 +534,10 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 	f.Domain = p.domain
 	f.Version = 9
 	f.ReceivedAt = p.d.ReceivedAt
-	st := decode.ResolveSysUp(p.d.ReceivedAt, p.unixSecs, 0, p.sysUp, v.first, v.last, v.hasFirst, v.hasLast, p.maxAge, p.skew)
+	st := decode.ResolveV9(p.d.ReceivedAt, p.unixSecs, p.sysUp, v.first, v.last, v.hasFirst, v.hasLast,
+		decode.AbsoluteMS{Set: v.startRank != absNone, MS: v.absStart},
+		decode.AbsoluteMS{Set: v.endRank != absNone, MS: v.absEnd},
+		p.maxAge, p.skew)
 	f.ExportTime = st.Export
 	f.Start = st.Start
 	f.End = st.End
@@ -559,6 +568,8 @@ type values struct {
 	srcMask, dstMask          *uint8
 	first, last               uint32
 	hasFirst, hasLast         bool
+	startRank, endRank        uint8
+	absStart, absEnd          int64
 	interval, random, sampler *uint64
 	algo                      *uint8
 	hasSampling               bool
@@ -646,6 +657,22 @@ func readRecord(fields []template.Field, rec []byte) (values, bool) {
 		case ieLast:
 			if x, ok := u32fit(raw); ok {
 				v.last, v.hasLast = x, true
+			}
+		case decode.FlowStartMilliseconds:
+			if x, ok := readUint(raw); ok && len(raw) == 8 && x <= uint64(math.MaxInt64) {
+				v.putAbs(true, absMilliseconds, int64(x))
+			}
+		case decode.FlowEndMilliseconds:
+			if x, ok := readUint(raw); ok && len(raw) == 8 && x <= uint64(math.MaxInt64) {
+				v.putAbs(false, absMilliseconds, int64(x))
+			}
+		case decode.FlowStartSeconds:
+			if x, ok := u32fit(raw); ok {
+				v.putAbs(true, absSeconds, int64(x)*1000)
+			}
+		case decode.FlowEndSeconds:
+			if x, ok := u32fit(raw); ok {
+				v.putAbs(false, absSeconds, int64(x)*1000)
 			}
 		case ieInBytes:
 			if x, ok := readUint(raw); ok {
@@ -873,6 +900,29 @@ func valueSize(fields []template.Field) int {
 		n += int(f.Length)
 	}
 	return n
+}
+
+const (
+	absNone uint8 = iota
+	absSeconds
+	absMilliseconds
+)
+
+// putAbs records one absolute endpoint. start selects the flow start.
+// A higher rank replaces a lower one. Milliseconds replace seconds.
+// The first element of a given rank is kept.
+func (v *values) putAbs(start bool, rank uint8, ms int64) {
+	if start {
+		if rank > v.startRank {
+			v.startRank = rank
+			v.absStart = ms
+		}
+		return
+	}
+	if rank > v.endRank {
+		v.endRank = rank
+		v.absEnd = ms
+	}
 }
 
 func readUint(b []byte) (uint64, bool) {

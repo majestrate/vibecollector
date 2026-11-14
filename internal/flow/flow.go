@@ -13,7 +13,7 @@ type TimeSource uint8
 
 const (
 	TimeSysUpTime TimeSource = iota // device milliseconds
-	TimeAbsolute                    // IPFIX absolute IE
+	TimeAbsolute                    // Unix time from an absolute IE
 	TimeExport                      // header export time only
 	TimeReceive                     // collector receive time
 )

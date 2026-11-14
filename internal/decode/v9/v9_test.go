@@ -537,6 +537,83 @@ func TestMissingFirstDoesNotSwap(t *testing.T) {
 	}
 }
 
+func TestAbsoluteMillisecondsKeepRealInterval(t *testing.T) {
+	start := time.Unix(1_700_000_000, 123_000_000).UTC()
+	end := start.Add(1500 * time.Millisecond)
+	received := start.Add(5 * time.Minute)
+	exportUnix := uint32(start.Unix() - 86400)
+	body := templateBody(256, [][2]uint16{{152, 8}, {153, 8}, {8, 4}, {12, 4}})
+	rec := make([]byte, 24)
+	binary.BigEndian.PutUint64(rec[0:8], uint64(start.UnixMilli()))
+	binary.BigEndian.PutUint64(rec[8:16], uint64(end.UnixMilli()))
+	copy(rec[16:24], []byte{192, 0, 2, 1, 192, 0, 2, 2})
+	pkt := append(header(2, 0, exportUnix, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	counters := obs.NewCounters()
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), received), mustCache(t), nil, nil, counters, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if f.TimeSource != flow.TimeAbsolute || f.ClockClamped || !f.Start.Equal(start) || !f.End.Equal(end) {
+		t.Fatalf("source %s start %s end %s clamped %v", timeSource(f.TimeSource), f.Start, f.End, f.ClockClamped)
+	}
+	if f.Start.Equal(received.Add(-2*time.Hour)) || counters.Snapshot()[obs.ClockClamped] != 0 {
+		t.Fatal(f.Start, counters.Snapshot()[obs.ClockClamped])
+	}
+	if !f.ExportTime.Equal(time.Unix(int64(exportUnix), 0).UTC()) {
+		t.Fatal(f.ExportTime)
+	}
+}
+
+func TestAbsoluteMillisecondsBeatSecondsAndSysUp(t *testing.T) {
+	received := time.Unix(1_700_000_000, 0).UTC()
+	start := received.Add(-2 * time.Second)
+	end := received.Add(-time.Second)
+	// Seconds and sysUpTime would land on different instants. Milliseconds win.
+	body := templateBody(256, [][2]uint16{{22, 4}, {21, 4}, {150, 4}, {151, 4}, {152, 8}, {153, 8}, {8, 4}, {12, 4}})
+	rec := make([]byte, 40)
+	binary.BigEndian.PutUint32(rec[0:4], 1)
+	binary.BigEndian.PutUint32(rec[4:8], 2)
+	binary.BigEndian.PutUint32(rec[8:12], uint32(received.Unix()-4000))
+	binary.BigEndian.PutUint32(rec[12:16], uint32(received.Unix()-4000))
+	binary.BigEndian.PutUint64(rec[16:24], uint64(start.UnixMilli()))
+	binary.BigEndian.PutUint64(rec[24:32], uint64(end.UnixMilli()))
+	copy(rec[32:36], []byte{192, 0, 2, 1})
+	copy(rec[36:40], []byte{192, 0, 2, 2})
+	pkt := append(header(2, 50_000, uint32(received.Unix()), 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), received), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if f.TimeSource != flow.TimeAbsolute || f.ClockClamped || !f.Start.Equal(start) || !f.End.Equal(end) {
+		t.Fatalf("source %s start %s end %s clamped %v", timeSource(f.TimeSource), f.Start, f.End, f.ClockClamped)
+	}
+}
+
+func TestAbsoluteSecondsWhenMillisecondsAbsent(t *testing.T) {
+	received := time.Unix(1_700_000_000, 0).UTC()
+	start := received.Add(-3 * time.Second)
+	end := received.Add(-time.Second)
+	body := templateBody(256, [][2]uint16{{150, 4}, {151, 4}, {8, 4}, {12, 4}})
+	rec := make([]byte, 16)
+	binary.BigEndian.PutUint32(rec[0:4], uint32(start.Unix()))
+	binary.BigEndian.PutUint32(rec[4:8], uint32(end.Unix()))
+	copy(rec[8:16], []byte{192, 0, 2, 1, 192, 0, 2, 2})
+	pkt := append(header(2, 0, uint32(received.Unix()-86400), 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), received), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if f.TimeSource != flow.TimeAbsolute || f.ClockClamped || !f.Start.Equal(start) || !f.End.Equal(end) {
+		t.Fatalf("source %s start %s end %s clamped %v", timeSource(f.TimeSource), f.Start, f.End, f.ClockClamped)
+	}
+}
+
 func TestIPv6HalvesAreHostOrder(t *testing.T) {
 	body := templateBody(256, [][2]uint16{{27, 16}, {28, 16}})
 	rec := make([]byte, 32)

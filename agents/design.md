@@ -2120,7 +2120,9 @@ func AbsMillis(export time.Time, sysUpTime, switched uint32, maxAge, skew time.D
 
 Anything older than `timestamp_max_age` (default 2 hours) is clamped by `AbsMillis` to `export - maxAge` and counted `timestamp_suspect`. Start and end are converted independently. If end is before start after conversion, swap them and count `timestamp_suspect`.
 
-**Clock clamp, after `AbsMillis`.** Queries, rollups, and retention all use the stored timestamps. Those stored values are clamped into `[received_at - timestamp_max_age, received_at + timestamp_skew_slack]`. A start or end outside that window is moved to the nearest edge and `clock_clamped` is set. Export time itself may be wild; the window is relative to `received_at`, so a device clock ten years ahead becomes `received_at + timestamp_skew_slack` and the sweeper can delete the row once retention passes. The UI shows a badge when `clock_clamped` is set. `time_source` is still `sysuptime`, `absolute`, `export`, or `receive`. `receive` is only used when the header time itself is unusable (`unix_secs` is 0 on v5 or v9); both start and end become `received_at`.
+**Clock clamp, after `AbsMillis`.** Queries, rollups, and retention all use the stored timestamps. Those stored values are clamped into `[received_at - timestamp_max_age, received_at + timestamp_skew_slack]`. A start or end outside that window is moved to the nearest edge and `clock_clamped` is set. Export time itself may be wild; the window is relative to `received_at`, so a device clock ten years ahead becomes `received_at + timestamp_skew_slack` and the sweeper can delete the row once retention passes. The UI shows a badge when `clock_clamped` is set. `time_source` is still `sysuptime`, `absolute`, `export`, or `receive`. `receive` is only used when the header time itself is unusable (`unix_secs` is 0 on v5 or v9) and the v9 record has no absolute time element; both start and end become `received_at`.
+
+**Absolute timestamps on v9.** A v9 template may carry the same Unix-epoch elements as IPFIX. For each end, independently, prefer flowStartMilliseconds (152) or flowEndMilliseconds (153), then flowStartSeconds (150) or flowEndSeconds (151). Both are network byte order. Milliseconds are 8 bytes. When an end has one of them, that instant is the flow time and FIRST_SWITCHED or LAST_SWITCHED is ignored for that end. `time_source` is `absolute`. The other end still uses the sysUpTime path when its absolute element is absent. The receive-window clamp still applies after that conversion. A stamp older than `received_at - timestamp_max_age` moves to that edge and sets `clock_clamped`. A record with neither absolute element keeps the sysUpTime path above. NTP nanosecond and microsecond elements stay on the IPFIX path.
 
 ### Template cache
 
@@ -2181,7 +2183,7 @@ type TimeSource uint8
 
 const (
     TimeSysUpTime TimeSource = iota // converted from device milliseconds
-    TimeAbsolute                    // IPFIX absolute IE
+    TimeAbsolute                    // Unix time from an absolute IE
     TimeExport                      // header export time only
     TimeReceive                     // collector receive time
 )

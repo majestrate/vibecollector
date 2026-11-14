@@ -86,14 +86,14 @@ func execute(exe string, args []string, stdout, stderr io.Writer) int {
 	switch cmd {
 	case "add":
 		if secret != "" && genSecret {
-			fmt.Fprint(stdout, "%s: cannot use -gen-secret when providing -secret\n", exe)
+			fmt.Fprintf(stdout, "%s: cannot use -gen-secret when providing -secret\n", exe)
 			return 2
 		}
 		encoding := base64.StdEncoding
 		if genSecret {
 			buf := make([]byte, 32)
 			if _, err := io.ReadFull(rand.Reader, buf); err != nil {
-				fmt.Fprint(stderr, "rand.Reader failed: %v", err)
+				fmt.Fprintf(stderr, "rand.Reader failed: %v", err)
 				return 2
 			}
 			secret = encoding.WithPadding(base64.NoPadding).EncodeToString(buf)
@@ -103,7 +103,7 @@ func execute(exe string, args []string, stdout, stderr io.Writer) int {
 		if genId {
 			buf := make([]byte, 8)
 			if _, err := io.ReadFull(rand.Reader, buf); err != nil {
-				fmt.Fprint(stderr, "rand.Reader failed: %v", err)
+				fmt.Fprintf(stderr, "rand.Reader failed: %v", err)
 				return 2
 			}
 			id = hex.EncodeToString(buf)

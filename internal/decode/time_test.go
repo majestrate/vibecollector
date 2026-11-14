@@ -189,6 +189,56 @@ func TestResolveUnixSecsZero(t *testing.T) {
 	}
 }
 
+func TestResolveV9KeepsAbsoluteInterval(t *testing.T) {
+	start := time.Unix(1_700_000_000, 123_000_000).UTC()
+	end := start.Add(1500 * time.Millisecond)
+	received := start.Add(5 * time.Minute)
+	// Header export is one day before the flow, which is what a replayed
+	// v9 packet carries when it does not send sysUpTime fields.
+	exportUnix := uint32(start.Unix() - 86400)
+	st := ResolveV9(received, exportUnix, 0, 0, 0, false, false,
+		AbsoluteMS{Set: true, MS: start.UnixMilli()},
+		AbsoluteMS{Set: true, MS: end.UnixMilli()},
+		2*time.Hour, 5*time.Second)
+	if st.Source != flow.TimeAbsolute || st.ClockClamped || st.Suspect != 0 || st.Skew != 0 {
+		t.Fatalf("%+v", st)
+	}
+	if !st.Start.Equal(start) || !st.End.Equal(end) {
+		t.Fatalf("start %s end %s", st.Start, st.End)
+	}
+	if st.Start.Equal(received.Add(-2*time.Hour)) || st.End.Equal(received.Add(-2*time.Hour)) {
+		t.Fatal("absolute times were replaced by the receive window edge")
+	}
+	if !st.Export.Equal(time.Unix(int64(exportUnix), 0).UTC()) {
+		t.Fatalf("export %s", st.Export)
+	}
+}
+
+func TestResolveV9ClampsAndSwaps(t *testing.T) {
+	received := time.Unix(1_700_000_000, 0).UTC()
+	late := received.Add(-time.Second)
+	early := received.Add(-72 * time.Hour)
+	st := ResolveV9(received, uint32(received.Unix()), 0, 0, 0, true, true,
+		AbsoluteMS{Set: true, MS: late.UnixMilli()},
+		AbsoluteMS{Set: true, MS: early.UnixMilli()},
+		2*time.Hour, 5*time.Second)
+	if st.Source != flow.TimeAbsolute || !st.ClockClamped || st.Suspect != 1 {
+		t.Fatalf("%+v", st)
+	}
+	if !st.Start.Equal(received.Add(-2*time.Hour)) || !st.End.Equal(late) {
+		t.Fatalf("start %s end %s", st.Start, st.End)
+	}
+}
+
+func TestResolveV9WithoutAbsoluteMatchesSysUp(t *testing.T) {
+	received := time.Unix(1_700_000_000, 0).UTC()
+	got := ResolveV9(received, 0, 100, 50, 90, true, true, AbsoluteMS{}, AbsoluteMS{}, 2*time.Hour, 5*time.Second)
+	want := ResolveSysUp(received, 0, 0, 100, 50, 90, true, true, 2*time.Hour, 5*time.Second)
+	if got != want {
+		t.Fatalf("got %+v want %+v", got, want)
+	}
+}
+
 func TestAbsMillisJustBelowWrapIsOK(t *testing.T) {
 	// sysUpTime 0 and switched MaxUint32 is one millisecond before the wrap,
 	// not a 49-day skew. The non-modular difference is far above slack.
