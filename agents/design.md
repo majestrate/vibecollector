@@ -1982,8 +1982,8 @@ When option field type 48 `FLOW_SAMPLER_ID` is present, also store the fact unde
 | 22 | FIRST_SWITCHED | sysUpTime ms of the first packet |
 | 23 | OUT_BYTES | `out_octets`. Becomes primary only when type 1 is absent. Not added to primary when type 1 is present |
 | 24 | OUT_PKTS | `out_packets`. Same rule against type 2 |
-| 27 | IPV6_SRC_ADDR | `src` |
-| 28 | IPV6_DST_ADDR | `dst` |
+| 27 | IPV6_SRC_ADDR | `src`. Two little-endian uint64 halves, stored in network byte order |
+| 28 | IPV6_DST_ADDR | `dst`. Same half order as type 27 |
 | 34 | SAMPLING_INTERVAL | N, "1 of N", when N > 1 |
 | 35 | SAMPLING_ALGORITHM | 1 deterministic, 2 random |
 | 48 | FLOW_SAMPLER_ID | `sampler:<n>` |

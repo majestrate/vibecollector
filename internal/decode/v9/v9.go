@@ -923,12 +923,16 @@ func addr4(b []byte) (netip.Addr, bool) {
 	return netip.AddrFrom4(a), true
 }
 
+// addr16 converts one IPv6 address to network byte order.
+// b is 16 bytes: two little-endian uint64 halves, which is the host order
+// used by the v9 exporter. ok is false when len(b) is not 16.
 func addr16(b []byte) (netip.Addr, bool) {
 	if len(b) != 16 {
 		return netip.Addr{}, false
 	}
 	var a [16]byte
-	copy(a[:], b)
+	binary.BigEndian.PutUint64(a[0:8], binary.LittleEndian.Uint64(b[0:8]))
+	binary.BigEndian.PutUint64(a[8:16], binary.LittleEndian.Uint64(b[8:16]))
 	return netip.AddrFrom16(a), true
 }
 

@@ -537,13 +537,38 @@ func TestMissingFirstDoesNotSwap(t *testing.T) {
 	}
 }
 
+func TestIPv6HalvesAreHostOrder(t *testing.T) {
+	body := templateBody(256, [][2]uint16{{27, 16}, {28, 16}})
+	rec := make([]byte, 32)
+	src := netip.MustParseAddr("2001:db8::1")
+	dst := netip.MustParseAddr("2001:db8:1::2")
+	copy(rec[0:16], ipv6Halves(src))
+	copy(rec[16:32], ipv6Halves(dst))
+	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), time.Unix(1_700_000_000, 0).UTC()), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	doc := netip.MustParsePrefix("2001:db8::/32")
+	if flows[0].Src != src || flows[0].Dst != dst || !doc.Contains(flows[0].Src) || !doc.Contains(flows[0].Dst) {
+		t.Fatal(flows[0].Src, flows[0].Dst)
+	}
+}
+
+func ipv6Halves(a netip.Addr) []byte {
+	b := a.As16()
+	var out [16]byte
+	binary.LittleEndian.PutUint64(out[0:8], binary.BigEndian.Uint64(b[0:8]))
+	binary.LittleEndian.PutUint64(out[8:16], binary.BigEndian.Uint64(b[8:16]))
+	return out[:]
+}
+
 func TestWideFieldsAndUnmap(t *testing.T) {
 	body := templateBody(256, [][2]uint16{{27, 16}, {28, 16}, {1, 8}, {16, 4}})
 	rec := make([]byte, 16+16+8+4)
-	src16 := netip.MustParseAddr("2001:db8::1").As16()
-	dst16 := netip.MustParseAddr("2001:db8::2").As16()
-	copy(rec[0:16], src16[:])
-	copy(rec[16:32], dst16[:])
+	copy(rec[0:16], ipv6Halves(netip.MustParseAddr("2001:db8::1")))
+	copy(rec[16:32], ipv6Halves(netip.MustParseAddr("2001:db8::2")))
 	binary.BigEndian.PutUint64(rec[32:40], 99)
 	binary.BigEndian.PutUint32(rec[40:44], 400000)
 	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, body)...)
