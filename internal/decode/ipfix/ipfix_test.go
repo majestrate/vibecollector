@@ -29,6 +29,20 @@ var (
 	testAt  = time.Unix(1_700_000_000, 0).UTC()
 )
 
+func TestICMPTypeCodeReplacesZeroPorts(t *testing.T) {
+	fields := [][2]uint16{{8, 4}, {12, 4}, {7, 2}, {11, 2}, {178, 1}, {179, 1}, {4, 1}}
+	rec := append(addrs(), 0, 0, 0, 0, 130, 0, 58)
+	templates, _, seq, counters := newState(t)
+	flows, _, missing, err := parse(t, flowPkt(7, fields, rec), templates, nil, seq, counters, false, testAge, testSkew)
+	if err != nil || missing != nil || len(flows) != 1 {
+		t.Fatal(err, missing != nil, len(flows))
+	}
+	f := flows[0]
+	if !f.ProtoPresent || f.Proto != 58 || !f.PortsPresent || f.DstPort != 0x8200 {
+		t.Fatalf("proto %d dst %d present %v", f.Proto, f.DstPort, f.PortsPresent)
+	}
+}
+
 func TestBasic(t *testing.T) {
 	p := readDatagrams(t, "ipfix_basic.bin")[0]
 	if len(p) < 16 || binary.BigEndian.Uint16(p[:2]) != 10 {

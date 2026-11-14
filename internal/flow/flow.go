@@ -24,6 +24,9 @@ const (
 // time, both semantics strings, and a start/end pair are required before
 // Submit. Ports, protocol, TCP flags, ToS, interfaces, nexthop, masks, BGP
 // AS numbers, sampling interval, and direction are optional.
+// For protocol 1 and 58, DstPort is (ICMP type<<8)|code when the export
+// carried an ICMP type element, and when a v5 record already packed the
+// type and code into the destination port. Protocol 0 stays 0.
 // CounterSemantics is "delta" or "total". OctetSemantics is "ip" or
 // "l4_payload". Stored Packets and Octets are never multiplied by N.
 // ClockClamped is set when Start or End was moved into

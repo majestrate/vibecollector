@@ -68,6 +68,9 @@ const (
 // flowStartSeconds (150) and flowEndSeconds (151) are used for an end that
 // has no millisecond element. A record with either absolute end has
 // time_source absolute. The receive-window clamp still applies after that.
+// ICMP type and code (element 32, or 176–179) are stored in the destination
+// port when the protocol is ICMP or ICMPv6. See decode.ICMPPorts. Protocol 0
+// is left as 0.
 // Framing walks each FlowSet Length until the payload is consumed. Count is
 // the record total from RFC 3954 §5.1, not a FlowSet loop bound. A Count that
 // disagrees with template records + options template records + data records +
@@ -501,6 +504,10 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 	}
 	p.applyCachedRate(v, &in)
 	rated := sampling.Rate(in)
+	if dst, ok := v.icmp.Apply(v.proto, v.protoOK); ok {
+		v.dstPort = dst
+		v.ports = true
+	}
 	var f flow.Flow
 	f.Src = v.src
 	f.Dst = v.dst
@@ -551,6 +558,7 @@ type values struct {
 	hasSrc, hasDst            bool
 	srcPort, dstPort          uint16
 	ports                     bool
+	icmp                      decode.ICMPPorts
 	proto                     uint8
 	protoOK                   bool
 	tcpFlags                  uint8
@@ -610,6 +618,8 @@ func readRecord(fields []template.Field, rec []byte) (values, bool) {
 			if x, ok := u16fit(raw); ok {
 				v.dstPort, v.ports = x, true
 			}
+		case decode.ICMPTypeCodeIPv4, decode.ICMPTypeIPv4, decode.ICMPCodeIPv4, decode.ICMPTypeIPv6, decode.ICMPCodeIPv6:
+			v.icmp.Note(f.Type, raw)
 		case ieProto:
 			if x, ok := u8fit(raw); ok {
 				v.proto, v.protoOK = x, true

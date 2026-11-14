@@ -48,6 +48,8 @@ const (
 	SourceIPv6Address uint16 = 27
 	// destinationIPv6Address
 	DestinationIPv6Address uint16 = 28
+	// icmpTypeCodeIPv4
+	ICMPTypeCodeIPv4 uint16 = 32
 	// samplingInterval
 	SamplingInterval uint16 = 34
 	// samplingAlgorithm
@@ -82,6 +84,14 @@ const (
 	FlowEndNanoseconds uint16 = 157
 	// systemInitTimeMilliseconds
 	SystemInitTimeMilliseconds uint16 = 160
+	// icmpTypeIPv4
+	ICMPTypeIPv4 uint16 = 176
+	// icmpCodeIPv4
+	ICMPCodeIPv4 uint16 = 177
+	// icmpTypeIPv6
+	ICMPTypeIPv6 uint16 = 178
+	// icmpCodeIPv6
+	ICMPCodeIPv6 uint16 = 179
 	// initiatorOctets
 	InitiatorOctets uint16 = 231
 	// responderOctets

@@ -30,7 +30,9 @@ VibeCollector can attach three kinds of context to an address:
 
 Those lookups share one enrichment interface. Each provider ships as a stub that adds no annotation and makes no outbound request. Annotations appear after a real provider client is configured on that interface. A provider that has no answer, or that fails, leaves the flow in the database and records that outcome.
 
-Addresses that are not globally routable — private, loopback, link-local, and multicast — are classified on the collector. They are not sent to providers.
+Addresses that are not globally routable — private, loopback, link-local, and multicast — are classified on the collector. They are not sent to providers. The flow table shows that classification next to the address.
+
+ICMP and ICMPv6 have no transport ports. When the export carries the ICMP type and code, that pair is stored in the destination port. The flow table shows a non-zero value as type.code. A flow whose protocol is 0 stays protocol 0.
 
 Lookup results are cached in memory. GeoIP and ASN change slowly. Reputation changes faster. Each provider keeps its own cache lifetime.
 

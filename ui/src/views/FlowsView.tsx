@@ -1,6 +1,7 @@
 import { useState, type ReactElement } from "react";
 import { useFilters } from "../filters";
 import { formatInZone } from "../filters";
+import { portText } from "../ports";
 import { asText, QueryBody, useGET } from "../query";
 
 interface FlowRow {
@@ -8,6 +9,8 @@ interface FlowRow {
   start: string;
   src: string;
   dst: string;
+  src_scope?: string;
+  dst_scope?: string;
   src_port?: number | null;
   dst_port?: number | null;
   proto?: number | null;
@@ -82,11 +85,13 @@ export function FlowsView(): ReactElement {
             {(query.data?.flows ?? []).map((flow) => (
               <tr key={String(flow.id)}>
                 <td>{wall(flow.start, filters.tz)}</td>
-                <td>{flow.src}</td>
-                <td>{flow.dst}</td>
                 <td>
-                  {flow.src_port ?? ""}→{flow.dst_port ?? ""}
+                  <Address addr={flow.src} scope={flow.src_scope} />
                 </td>
+                <td>
+                  <Address addr={flow.dst} scope={flow.dst_scope} />
+                </td>
+                <td>{portText(flow.proto, flow.src_port, flow.dst_port)}</td>
                 <td>{flow.proto ?? ""}</td>
                 <td>{asText(flow.packets)}</td>
                 <td>{asText(flow.octets)}</td>
@@ -111,6 +116,24 @@ export function FlowsView(): ReactElement {
         </div>
       </QueryBody>
     </section>
+  );
+}
+
+/**
+ * Address shows one endpoint and, when it is not global, its scope string.
+ * addr is the IP. scope is src_scope or dst_scope from the flow.
+ */
+function Address({ addr, scope }: { addr: string; scope?: string }): ReactElement {
+  return (
+    <>
+      {addr}
+      {scope && scope !== "global" ? (
+        <>
+          {" "}
+          <span className="badge">{scope}</span>
+        </>
+      ) : null}
+    </>
   );
 }
 

@@ -61,6 +61,9 @@ const (
 // Gaps are GapRecords and sequence_gap_ipfix_records only.
 // Absolute timestamps outrank sysUpTime per endpoint. NTP era 0 ends at
 // 2036-02-07 06:28:16 UTC. The era closest to d.ReceivedAt is stored.
+// ICMP type and code (element 32, or 176–179) are stored in the destination
+// port when the protocol is ICMP or ICMPv6. See decode.ICMPPorts. Protocol 0
+// is left as 0.
 // A nil templates, samples, seq, or counters skips that side effect.
 // Parse does not call Hold and does not touch SQLite.
 // Parse returns decode.ErrMalformed or decode.ErrShortSet, or an error from
@@ -474,6 +477,10 @@ func (p *parser) makeFlow(v values) (flow.Flow, stampCounts) {
 	in := rateInput(v)
 	p.applyCachedRate(v, &in)
 	rated := sampling.Rate(in)
+	if dst, ok := v.icmp.Apply(v.proto, v.protoOK); ok {
+		v.dstPort = dst
+		v.ports = true
+	}
 	var f flow.Flow
 	f.Src = v.src
 	f.Dst = v.dst
@@ -824,6 +831,7 @@ type values struct {
 	hasSrc, hasDst            bool
 	srcPort, dstPort          uint16
 	ports                     bool
+	icmp                      decode.ICMPPorts
 	proto                     uint8
 	protoOK                   bool
 	tcpFlags                  uint8
@@ -962,6 +970,8 @@ func applyField(v *values, typ uint16, raw []byte) {
 		if x, ok := u16fit(raw); ok {
 			v.dstPort, v.ports = x, true
 		}
+	case decode.ICMPTypeCodeIPv4, decode.ICMPTypeIPv4, decode.ICMPCodeIPv4, decode.ICMPTypeIPv6, decode.ICMPCodeIPv6:
+		v.icmp.Note(typ, raw)
 	case decode.ProtocolIdentifier:
 		if x, ok := u8fit(raw); ok {
 			v.proto, v.protoOK = x, true

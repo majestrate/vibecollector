@@ -1972,6 +1972,11 @@ When option field type 48 `FLOW_SAMPLER_ID` is present, also store the fact unde
 | 9 | SRC_MASK | `src_mask` |
 | 10 | INPUT_SNMP | `input_if` |
 | 11 | L4_DST_PORT | `dst_port` |
+| 32 | ICMP type/code | When `ip_proto` is 1 or 58, stored in `dst_port` as `(type<<8)\|code`. Two bytes, type then code. Wins over type 11 and over 176–179. Also used for ICMPv6 |
+| 176 | icmpTypeIPv4 | High byte of `dst_port` when type 32 is absent and `ip_proto` is 1 |
+| 177 | icmpCodeIPv4 | Low byte of `dst_port` in that same case |
+| 178 | icmpTypeIPv6 | High byte of `dst_port` when type 32 is absent and `ip_proto` is 58 |
+| 179 | icmpCodeIPv6 | Low byte of `dst_port` in that same case |
 | 12 | IPV4_DST_ADDR | `dst` |
 | 13 | DST_MASK | `dst_mask` |
 | 14 | OUTPUT_SNMP | `output_if` |
@@ -1992,6 +1997,8 @@ When option field type 48 `FLOW_SAMPLER_ID` is present, also store the fact unde
 | 61 | DIRECTION | 0 ingress, 1 egress, stored in `flow_direction`. Absent leaves the column NULL |
 | 85 | octetTotalCount | Used only when type 1 and OUT_BYTES (23) are both absent. `counter_semantics = total`. IE 231 is not selected while 85 is present |
 | 86 | packetTotalCount | Used only when type 2 and OUT_PKTS (24) are both absent. `counter_semantics = total` |
+
+Element 32 on UDP or on protocol 0 does not replace the layer-4 port and does not change `ip_proto`. Protocol 0 stays 0. A zero element 32 on ICMP is echo reply (type 0, code 0) and is stored. The flow table prints a non-zero `dst_port` for protocols 1 and 58 as `type.code`. A zero destination port stays `0→0`. NetFlow v5 already packs that same uint16 into the destination port; the decoder does not rewrite v5 ports.
 
 A template with neither an IPv4 nor an IPv6 source and destination does not emit a flow. If it carries sampling fields, update the sampling cache. `sampling.Rate` is the only function that turns these fields into `sampled`, N, `counter_semantics`, and `octet_semantics`.
 
@@ -2590,7 +2597,7 @@ Routes, all under the shell:
 | Globe | `/globe` | `/api/v1/geo` |
 | Exporter health strip | shell, not a separate product view | `/api/v1/exporters` and `/api/v1/stats` every 5 s |
 
-Charts use **Recharts 3.10.1** (MIT). Time series plots the sampled series and the unsampled series as separate lines, and plots octets and packets. It does not multiply either line by N. Ranges longer than 7 days, served from rollups, are aggregated to hours by the API. Top talkers and ASN are horizontal bar charts, default 20 rows, `limit` up to 100. The flow table is keyset pages of 100. It shows a "sampled 1:N" badge, a "total counter" badge, an "L4 payload" badge when `octet_semantics` is `l4_payload`, and a "clock clamped" badge. Direction is shown when `flow_direction` is 0 or 1. The estimate column is off unless toggled; the value is `octets * sampling_interval` computed in the browser and labeled "estimated, not stored". A flow-table range that starts before raw retention shows an empty table and `raw_available_from`. The exporter strip shows last packet time, malformed, missing template, and the three gap counters with their units.
+Charts use **Recharts 3.10.1** (MIT). Time series plots the sampled series and the unsampled series as separate lines, and plots octets and packets. It does not multiply either line by N. Ranges longer than 7 days, served from rollups, are aggregated to hours by the API. Top talkers and ASN are horizontal bar charts, default 20 rows, `limit` up to 100. The flow table is keyset pages of 100. A non-global address is shown with its scope string. Protocols 1 and 58 show a non-zero destination port as ICMP `type.code`. It shows a "sampled 1:N" badge, a "total counter" badge, an "L4 payload" badge when `octet_semantics` is `l4_payload`, and a "clock clamped" badge. Direction is shown when `flow_direction` is 0 or 1. The estimate column is off unless toggled; the value is `octets * sampling_interval` computed in the browser and labeled "estimated, not stored". A flow-table range that starts before raw retention shows an empty table and `raw_available_from`. The exporter strip shows last packet time, malformed, missing template, and the three gap counters with their units.
 
 **Flat map.** `react-simple-maps` 5.0.5 (`ComposableMap`, `Geographies`, `Geography`, `Line`, `ZoomableGroup`). Projection `geoEqualEarth`. `MapView` does not import `GlobeView`. It calls `fetchGeo` in `ui/src/geo/fetch.ts` and `colorForOctets` in `ui/src/geo/scale.ts`. The published `Geographies` prop type is `string | GeoJsonObject | GeoJsonObject[]`. `Topology` is not in that union. The call site casts the imported `countries-50m` module. The 5.0.5 runtime treats an object whose `type` is `"Topology"` as topology and does not `fetch` it; the first object key is `countries`. Choropleth fill comes from `colorForOctets` (`d3-scale` `scaleQuantize`, pinned 4.0.3). Zero-traffic countries use a neutral fill and still draw, including the five null-id features. `Line` arcs use centroids or API coordinates. Stroke width scales with octets. At most the 100 paths from the response are drawn. Pan and zoom stay inside the SVG. There is no tile URL.
 

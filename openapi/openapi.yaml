@@ -1705,7 +1705,10 @@ components:
           nullable: true
           minimum: 0
           maximum: 65535
-          description: Destination port. Null or absent when the export did not carry it.
+          description: |
+            Destination port. Null or absent when the export did not carry it.
+            For `proto` 1 and 58 this is `(ICMP type<<8)|code`, the same layout NetFlow v5 uses.
+            The flow table prints a non-zero value as type.code.
         proto:
           type: integer
           nullable: true

@@ -614,6 +614,73 @@ func TestAbsoluteSecondsWhenMillisecondsAbsent(t *testing.T) {
 	}
 }
 
+func TestICMPTypeCodeReplacesZeroPorts(t *testing.T) {
+	// nfreplay writes the layer-4 ports as 0 and the type/code in element 32.
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {7, 2}, {11, 2}, {32, 2}, {4, 1}})
+	rec := []byte{
+		192, 0, 2, 1,
+		192, 0, 2, 2,
+		0, 0,
+		0, 0,
+		0x82, 0x00, // type 130, code 0
+		58,
+	}
+	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), time.Unix(1_700_000_000, 0).UTC()), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if !f.ProtoPresent || f.Proto != 58 || !f.PortsPresent || f.SrcPort != 0 || f.DstPort != 0x8200 {
+		t.Fatalf("proto %d src %d dst %d present %v", f.Proto, f.SrcPort, f.DstPort, f.PortsPresent)
+	}
+}
+
+func TestUDPKeepsPortWhenICMPElementIsZero(t *testing.T) {
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {7, 2}, {11, 2}, {32, 2}, {4, 1}})
+	rec := []byte{
+		192, 0, 2, 1,
+		192, 0, 2, 2,
+		0x14, 0xe9, // 5353
+		0x14, 0xe9,
+		0, 0,
+		17,
+	}
+	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), time.Unix(1_700_000_000, 0).UTC()), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if f.Proto != 17 || f.SrcPort != 5353 || f.DstPort != 5353 {
+		t.Fatalf("proto %d src %d dst %d", f.Proto, f.SrcPort, f.DstPort)
+	}
+}
+
+func TestProtocolZeroIsNotRewritten(t *testing.T) {
+	body := templateBody(256, [][2]uint16{{8, 4}, {12, 4}, {7, 2}, {11, 2}, {32, 2}, {4, 1}})
+	rec := []byte{
+		192, 0, 2, 1,
+		192, 0, 2, 2,
+		0, 0,
+		0, 0,
+		0x82, 0x00,
+		0,
+	}
+	pkt := append(header(2, 0, 1_700_000_000, 0, 1), flowSet(0, body)...)
+	pkt = append(pkt, flowSet(256, rec)...)
+	flows, _, _, err := Parse(datagram(pkt, netip.MustParseAddr("192.0.2.8"), time.Unix(1_700_000_000, 0).UTC()), mustCache(t), nil, nil, nil, false, 2*time.Hour, 5*time.Second)
+	if err != nil || len(flows) != 1 {
+		t.Fatal(err, len(flows))
+	}
+	f := flows[0]
+	if !f.ProtoPresent || f.Proto != 0 || f.DstPort != 0 {
+		t.Fatalf("proto %d present %v dst %d", f.Proto, f.ProtoPresent, f.DstPort)
+	}
+}
+
 func TestIPv6HalvesAreHostOrder(t *testing.T) {
 	body := templateBody(256, [][2]uint16{{27, 16}, {28, 16}})
 	rec := make([]byte, 32)
