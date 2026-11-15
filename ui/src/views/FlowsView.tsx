@@ -3,6 +3,7 @@ import { useFilters } from "../filters";
 import { formatInZone } from "../filters";
 import { protocolText, serviceLabel, useFlowLabels } from "../netdb";
 import { portText } from "../ports";
+import { addressScope } from "../scope";
 import { asText, QueryBody, useGET } from "../query";
 
 const EMPTY_FLOWS: FlowRow[] = [];
@@ -139,15 +140,18 @@ export function FlowsView(): ReactElement {
 /**
  * Address shows one endpoint and, when it is not global, its scope string.
  * addr is the IP. scope is src_scope or dst_scope from the flow.
+ * An address inside 200::/7 is labeled yggdrasil even when the stored scope
+ * is still global.
  */
 function Address({ addr, scope }: { addr: string; scope?: string }): ReactElement {
+  const label = addressScope(addr, scope);
   return (
     <>
       {addr}
-      {scope && scope !== "global" ? (
+      {label ? (
         <>
           {" "}
-          <span className="badge">{scope}</span>
+          <span className="badge">{label}</span>
         </>
       ) : null}
     </>
