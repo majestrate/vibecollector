@@ -1,7 +1,7 @@
 import { useState, type ReactElement } from "react";
 import { useFilters } from "../filters";
 import { formatInZone } from "../filters";
-import { protocolText, serviceLabel, serviceText, useFlowLabels } from "../netdb";
+import { protocolText, serviceLabel, useFlowLabels } from "../netdb";
 import { portText } from "../ports";
 import { asText, QueryBody, useGET } from "../query";
 
@@ -79,7 +79,6 @@ export function FlowsView(): ReactElement {
               <th>Source</th>
               <th>Destination</th>
               <th>Ports</th>
-              <th>Service</th>
               <th>Proto</th>
               <th>Packets</th>
               <th>Octets</th>
@@ -91,7 +90,6 @@ export function FlowsView(): ReactElement {
           <tbody>
             {flows.map((flow) => {
               const protoName = flow.proto == null ? undefined : labels.protocols.get(flow.proto);
-              const icmp = flow.proto === 1 || flow.proto === 58;
               return (
                 <tr key={String(flow.id)}>
                   <td>{wall(flow.start, filters.tz)}</td>
@@ -101,14 +99,14 @@ export function FlowsView(): ReactElement {
                   <td>
                     <Address addr={flow.dst} scope={flow.dst_scope} />
                   </td>
-                  <td>{portText(flow.proto, flow.src_port, flow.dst_port)}</td>
                   <td>
-                    {icmp
-                      ? ""
-                      : serviceText(
-                          serviceLabel(labels, flow.src_port, protoName),
-                          serviceLabel(labels, flow.dst_port, protoName),
-                        )}
+                    {portText(
+                      flow.proto,
+                      flow.src_port,
+                      flow.dst_port,
+                      serviceLabel(labels, flow.src_port, protoName),
+                      serviceLabel(labels, flow.dst_port, protoName),
+                    )}
                   </td>
                   <td>{protocolText(flow.proto, protoName)}</td>
                   <td>{asText(flow.packets)}</td>

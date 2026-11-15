@@ -6,12 +6,17 @@
  * A zero destination port stays numeric. That value is also ICMP echo reply,
  * and it is what older v9 rows stored before the type was kept.
  * Other protocols show the two ports separated by an arrow.
- * A missing port is an empty side.
+ * srcService and dstService are official service names. A known name is
+ * written after its port in parentheses. A port with no service name is the
+ * port number alone. A missing port is an empty side.
+ * Protocols 1 and 58 ignore service names.
  */
 export function portText(
   proto: number | null | undefined,
   src: number | null | undefined,
   dst: number | null | undefined,
+  srcService?: string,
+  dstService?: string,
 ): string {
   if ((proto === 1 || proto === 58) && dst !== undefined && dst !== null && dst !== 0) {
     const type = (dst >> 8) & 0xff;
@@ -19,5 +24,12 @@ export function portText(
     const left = src === undefined || src === null ? "" : String(src);
     return `${left}→${type}.${code}`;
   }
-  return `${src ?? ""}→${dst ?? ""}`;
+  const named = proto !== 1 && proto !== 58;
+  return `${portSide(src, named ? srcService : undefined)}→${portSide(dst, named ? dstService : undefined)}`;
+}
+
+function portSide(port: number | null | undefined, service: string | undefined): string {
+  if (port === undefined || port === null) return "";
+  if (!service) return String(port);
+  return `${port} (${service})`;
 }

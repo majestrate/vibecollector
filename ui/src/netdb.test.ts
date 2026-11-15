@@ -5,7 +5,6 @@ import {
   protocolText,
   resetNetdbCache,
   resolveFlowLabels,
-  serviceText,
 } from "./netdb";
 import { setAccessToken, setAPIPrefix } from "./session";
 
@@ -16,14 +15,10 @@ afterEach(() => {
   vi.restoreAllMocks();
 });
 
-test("protocol and service cells keep the number when a name is absent", () => {
+test("protocol cell keeps the number when a name is absent", () => {
   expect(protocolText(6, "tcp")).toBe("tcp (6)");
   expect(protocolText(6, undefined)).toBe("6");
   expect(protocolText(null, "tcp")).toBe("");
-  expect(serviceText("http", "https")).toBe("http→https");
-  expect(serviceText("http", undefined)).toBe("http→");
-  expect(serviceText(undefined, "https")).toBe("→https");
-  expect(serviceText(undefined, undefined)).toBe("");
 });
 
 test("flow labels use the protocol and service lookup API once per value", async () => {

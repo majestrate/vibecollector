@@ -1070,7 +1070,7 @@ type Endpoint struct {
 
 // Scope is the local classification name: unspecified, loopback, link_local,
 // multicast, broadcast, private, shared, documentation, benchmark, reserved,
-// or global. Only global is looked up.
+// yggdrasil, or global. Only global is looked up.
 type Scope string
 
 // Outcome is one provider result stored on the flow.
@@ -1163,6 +1163,7 @@ type Rep struct {
 // 6to4 (2002::/16) and NAT64 (64:ff9b::/96) inherit the embedded IPv4 scope.
 // When that IPv4 is global, the IPv6 address is global.
 // 255.255.255.255/32 is broadcast. ORCHIDv2 2001:20::/28 is reserved.
+// Yggdrasil 200::/7 is scope yggdrasil. 2000::/3 stays global.
 // Only Scope "global" may be passed to Provider.Lookup.
 // The prefix table in Address classification is the full list.
 func Classify(addr netip.Addr) flow.Scope
@@ -2327,7 +2328,10 @@ Do not use `netip.Addr.IsGlobalUnicast` as the gate. In the Go 1.27 standard lib
 | `documentation` | `192.0.2.0/24`, `198.51.100.0/24`, `203.0.113.0/24`, `2001:db8::/32` |
 | `benchmark` | `198.18.0.0/15`, `2001:2::/48` |
 | `reserved` | `192.0.0.0/24`, `240.0.0.0/4` except the limited broadcast already classified, `100::/64` (discard-only), `2001:10::/28` (ORCHID), `2001:20::/28` (ORCHIDv2), `64:ff9b:1::/48` |
+| `yggdrasil` | `200::/7` |
 | `global` | everything else that is not given a scope by the embedded-IPv4 rules below |
+
+`200::/7` is scope `yggdrasil`. That prefix is `0200::` through `03ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff`. `2000::/3` stays `global`. `2002::/16` is outside `200::/7`.
 
 `2002::/16` (6to4) and `64:ff9b::/96` (NAT64 well-known prefix) both take the last 32 bits as an IPv4 address and inherit that address's scope. When the embedded IPv4 classifies as `global`, the IPv6 address is `global` and may be looked up. Otherwise the IPv6 address keeps the embedded scope and skips providers.
 
@@ -2597,7 +2601,7 @@ Routes, all under the shell:
 | Globe | `/globe` | `/api/v1/geo` |
 | Exporter health strip | shell, not a separate product view | `/api/v1/exporters` and `/api/v1/stats` every 5 s |
 
-Charts use **Recharts 3.10.1** (MIT). Time series plots the sampled series and the unsampled series as separate lines, and plots octets and packets. It does not multiply either line by N. Ranges longer than 7 days, served from rollups, are aggregated to hours by the API. Top talkers and ASN are horizontal bar charts, default 20 rows, `limit` up to 100. The flow table is keyset pages of 100. A non-global address is shown with its scope string. Each row looks up `GET /api/v1/protocol?number=` and then `GET /api/v1/service?port=&protocol=` for the signed-in client, so host names and that client's additions are what the table shows. The protocol column is the official name and the number. The service column is the official service name of each port. Protocols 1 and 58 show a non-zero destination port as ICMP `type.code` and leave the service column empty. It shows a "sampled 1:N" badge, a "total counter" badge, an "L4 payload" badge when `octet_semantics` is `l4_payload`, and a "clock clamped" badge. Direction is shown when `flow_direction` is 0 or 1. The estimate column is off unless toggled; the value is `octets * sampling_interval` computed in the browser and labeled "estimated, not stored". A flow-table range that starts before raw retention shows an empty table and `raw_available_from`. The exporter strip shows last packet time, malformed, missing template, and the three gap counters with their units.
+Charts use **Recharts 3.10.1** (MIT). Time series plots the sampled series and the unsampled series as separate lines, and plots octets and packets. It does not multiply either line by N. Ranges longer than 7 days, served from rollups, are aggregated to hours by the API. Top talkers and ASN are horizontal bar charts, default 20 rows, `limit` up to 100. The flow table is keyset pages of 100. A non-global address is shown with its scope string. Each row looks up `GET /api/v1/protocol?number=` and then `GET /api/v1/service?port=&protocol=` for the signed-in client, so host names and that client's additions are what the table shows. The protocol column is the official name and the number. The ports column writes a known service name in parentheses after the port (`80 (http)→443 (https)`). A port with no service name is the port number. Protocols 1 and 58 show a non-zero destination port as ICMP `type.code`. It shows a "sampled 1:N" badge, a "total counter" badge, an "L4 payload" badge when `octet_semantics` is `l4_payload`, and a "clock clamped" badge. Direction is shown when `flow_direction` is 0 or 1. The estimate column is off unless toggled; the value is `octets * sampling_interval` computed in the browser and labeled "estimated, not stored". A flow-table range that starts before raw retention shows an empty table and `raw_available_from`. The exporter strip shows last packet time, malformed, missing template, and the three gap counters with their units.
 
 **Flat map.** `react-simple-maps` 5.0.5 (`ComposableMap`, `Geographies`, `Geography`, `Line`, `ZoomableGroup`). Projection `geoEqualEarth`. `MapView` does not import `GlobeView`. It calls `fetchGeo` in `ui/src/geo/fetch.ts` and `colorForOctets` in `ui/src/geo/scale.ts`. The published `Geographies` prop type is `string | GeoJsonObject | GeoJsonObject[]`. `Topology` is not in that union. The call site casts the imported `countries-50m` module. The 5.0.5 runtime treats an object whose `type` is `"Topology"` as topology and does not `fetch` it; the first object key is `countries`. Choropleth fill comes from `colorForOctets` (`d3-scale` `scaleQuantize`, pinned 4.0.3). Zero-traffic countries use a neutral fill and still draw, including the five null-id features. `Line` arcs use centroids or API coordinates. Stroke width scales with octets. At most the 100 paths from the response are drawn. Pan and zoom stay inside the SVG. There is no tile URL.
 
@@ -3289,7 +3293,7 @@ Fixtures live in `internal/decode/testdata/` as `.bin` datagrams plus `.json` fi
 | Per-exporter mutex | 6 | Two goroutines withdraw and redefine one key. The map matches the last writer |
 | `FuzzDispatch` | 6 | Seeded with the golden files |
 | UDP localhost | 6 | Real UDP socket. A full datagram queue does not block the reader and increments `dropped_queue`. Two goroutines call `Session.Accept` |
-| `scope_test.go` | 7 | Every prefix in the classification table, NAT64 and 6to4 inheritance, ORCHIDv2, `broadcast` for `255.255.255.255`, and `IsGlobalUnicast` being the wrong answer for `10.1.1.1` |
+| `scope_test.go` | 7 | Every prefix in the classification table, NAT64 and 6to4 inheritance, ORCHIDv2, `broadcast` for `255.255.255.255`, `yggdrasil` for `200::/7` with `2000::1` and `400::` staying `global`, and `IsGlobalUnicast` being the wrong answer for `10.1.1.1` |
 | `stub_test.go` | 7 | Import graph allows `net/netip` and rejects `net`, `net/http`, `os`, and `crypto/` |
 | `cache_test.go` | 7 | Fifty concurrent misses call the fake once. A value older than its TTL is loaded again before the LRU is full. The 100,001st key evicts |
 | `migrate_test.go` and pragma test | 2 | Empty file ends at version 1. Second open does not re-apply. A second pooled connection reports `synchronous=NORMAL` and a non-zero `busy_timeout` |

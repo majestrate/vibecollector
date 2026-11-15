@@ -66,16 +66,6 @@ export function protocolText(number: number | null | undefined, name: string | u
 }
 
 /**
- * serviceText is the service cell for the two ports.
- * src and dst are official service names. An absent side stays empty.
- * The result is empty when neither side has a name.
- */
-export function serviceText(src: string | undefined, dst: string | undefined): string {
-  if (!src && !dst) return "";
-  return `${src ?? ""}→${dst ?? ""}`;
-}
-
-/**
  * lookupProtocolName reads GET /protocol?number=.
  * number is the IP protocol number. The result is the official name.
  * A missing entry is null. A failed request is null and is not cached.

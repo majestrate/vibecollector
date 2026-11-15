@@ -155,11 +155,12 @@ func TestSkipNonGlobal(t *testing.T) {
 		basicFlow("10.1.1.1", "192.168.1.1"),
 		basicFlow("::ffff:10.1.1.1", "8.8.8.8"),
 		basicFlow("64:ff9b::10.1.1.1", "2002:a01:101::"),
+		basicFlow("200::1", "1.1.1.1"),
 	)
-	if calls.Load() != 3 {
+	if calls.Load() != 6 {
 		t.Fatalf("calls %d", calls.Load())
 	}
-	if len(sink.flows) != 3 {
+	if len(sink.flows) != 4 {
 		t.Fatalf("flows %d", len(sink.flows))
 	}
 	bySrc := map[string]flow.Flow{}
@@ -186,12 +187,19 @@ func TestSkipNonGlobal(t *testing.T) {
 	if nat64.SrcEnrich.Scope != ScopePrivate || nat64.DstEnrich.Scope != ScopePrivate {
 		t.Fatalf("nat64/6to4 %+v %+v", nat64.SrcEnrich.Scope, nat64.DstEnrich.Scope)
 	}
+	ygg := bySrc["200::1"]
+	if ygg.SrcEnrich.Scope != ScopeYggdrasil || ygg.SrcEnrich.Geo.Kind != flow.OutcomeSkipped {
+		t.Fatalf("yggdrasil src %+v", ygg.SrcEnrich)
+	}
+	if ygg.DstEnrich.Scope != ScopeGlobal || ygg.DstEnrich.Geo.Kind != flow.OutcomeValue || ygg.DstEnrich.Geo.Country != "US" {
+		t.Fatalf("yggdrasil dst %+v", ygg.DstEnrich)
+	}
 	snap := counters.Snapshot()
-	// Flow 0: 2 skipped endpoints. Flow 1: 1 skipped. Flow 2: 2 skipped. 5 per provider.
-	if snap[obs.EnrichGeoIPSkipped] != 5 || snap[obs.EnrichASNSkipped] != 5 || snap[obs.EnrichReputationSkipped] != 5 {
+	// Flow 0: 2 skipped endpoints. Flow 1: 1 skipped. Flow 2: 2 skipped. Flow 3: 1 skipped. 6 per provider.
+	if snap[obs.EnrichGeoIPSkipped] != 6 || snap[obs.EnrichASNSkipped] != 6 || snap[obs.EnrichReputationSkipped] != 6 {
 		t.Fatal(snap[obs.EnrichGeoIPSkipped], snap[obs.EnrichASNSkipped], snap[obs.EnrichReputationSkipped])
 	}
-	if snap[obs.EnrichGeoIPValue] != 1 {
+	if snap[obs.EnrichGeoIPValue] != 2 {
 		t.Fatal(snap[obs.EnrichGeoIPValue])
 	}
 }

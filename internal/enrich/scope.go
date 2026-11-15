@@ -17,6 +17,7 @@ const (
 	ScopeDocumentation flow.Scope = "documentation"
 	ScopeBenchmark     flow.Scope = "benchmark"
 	ScopeReserved      flow.Scope = "reserved"
+	ScopeYggdrasil     flow.Scope = "yggdrasil"
 	ScopeGlobal        flow.Scope = "global"
 )
 
@@ -62,6 +63,8 @@ var (
 		{netip.MustParsePrefix("2001:10::/28"), ScopeReserved},
 		{netip.MustParsePrefix("2001:20::/28"), ScopeReserved},
 		{netip.MustParsePrefix("64:ff9b:1::/48"), ScopeReserved},
+		// 200::/7 is Yggdrasil. It does not cover 2000::/3 or 6to4 2002::/16.
+		{netip.MustParsePrefix("200::/7"), ScopeYggdrasil},
 	}
 )
 
@@ -70,6 +73,7 @@ var (
 // 6to4 (2002::/16) and NAT64 (64:ff9b::/96) inherit the embedded IPv4 scope.
 // When that IPv4 is global, the IPv6 address is global.
 // 255.255.255.255/32 is broadcast. ORCHIDv2 2001:20::/28 is reserved.
+// Yggdrasil 200::/7 is scope yggdrasil. 2000::/3 stays global.
 // Only Scope "global" may be passed to Provider.Lookup.
 // The prefix table in the design's Address classification section is the full list.
 func Classify(addr netip.Addr) flow.Scope {

@@ -61,6 +61,11 @@ func TestClassify(t *testing.T) {
 		{"203.0.113.1", ScopeDocumentation},
 		{"2001:db8::1", ScopeDocumentation},
 
+		{"200::", ScopeYggdrasil},
+		{"200::1", ScopeYggdrasil},
+		{"300::1", ScopeYggdrasil},
+		{"3ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", ScopeYggdrasil},
+
 		{"198.18.0.0", ScopeBenchmark},
 		{"198.18.0.1", ScopeBenchmark},
 		{"198.19.255.255", ScopeBenchmark},
@@ -101,6 +106,9 @@ func TestClassify(t *testing.T) {
 		{"198.20.0.1", ScopeGlobal},
 		{"223.255.255.255", ScopeGlobal},
 		{"::2", ScopeGlobal},
+		{"1ff:ffff:ffff:ffff:ffff:ffff:ffff:ffff", ScopeGlobal},
+		{"400::", ScopeGlobal},
+		{"2000::1", ScopeGlobal},
 		{"2001:3::1", ScopeGlobal},
 		{"2001:2:1::1", ScopeGlobal},
 		{"2001:30::1", ScopeGlobal},

@@ -30,7 +30,7 @@ VibeCollector can attach three kinds of context to an address:
 
 Those lookups share one enrichment interface. Each provider ships as a stub that adds no annotation and makes no outbound request. Annotations appear after a real provider client is configured on that interface. A provider that has no answer, or that fails, leaves the flow in the database and records that outcome.
 
-Addresses that are not globally routable — private, loopback, link-local, and multicast — are classified on the collector. They are not sent to providers. The flow table shows that classification next to the address.
+Addresses that are not globally routable — private, loopback, link-local, multicast, and Yggdrasil `200::/7` — are classified on the collector. They are not sent to providers. The flow table shows that classification next to the address. Yggdrasil is scope `yggdrasil`. The global-unicast prefix `2000::/3` stays global.
 
 ICMP and ICMPv6 have no transport ports. When the export carries the ICMP type and code, that pair is stored in the destination port. The flow table shows a non-zero value as type.code. A flow whose protocol is 0 stays protocol 0.
 
@@ -58,7 +58,7 @@ The daemon serves the API behind these views. A production install also serves t
 
 The collector reads the host protocol and service tables. A registered OAuth client can add names on top of those tables. The additions are stored in the database for that client only. They are applied after the host tables, and a name the host already has keeps the host value when a client looks one up. The API that reads and writes those additions is in the OpenAPI document. A client cannot store a file path there.
 
-The flow table looks up each flow through that API. The protocol column shows the official name beside the protocol number. The service column shows the official service name of the source port and the destination port. ICMP and ICMPv6 keep type and code in the port column and leave the service column empty.
+The flow table looks up each flow through that API. The protocol column shows the official name beside the protocol number. The ports column shows a known service name in parentheses after the port, as in `80 (http)→443 (https)`. A port with no service name is shown as the port number. ICMP and ICMPv6 keep type and code in that column.
 
 ## What stays on this machine
 

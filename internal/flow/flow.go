@@ -127,7 +127,7 @@ type Endpoint struct {
 
 // Scope is the local classification name: unspecified, loopback, link_local,
 // multicast, broadcast, private, shared, documentation, benchmark, reserved,
-// or global. Only global is looked up.
+// yggdrasil, or global. Only global is looked up.
 type Scope string
 
 // Outcome is one provider result stored on the flow.

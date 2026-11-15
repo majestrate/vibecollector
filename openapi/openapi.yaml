@@ -2346,6 +2346,7 @@ components:
         - documentation
         - benchmark
         - reserved
+        - yggdrasil
         - global
     Outcome:
       type: string
