@@ -58,6 +58,8 @@ The daemon serves the API behind these views. A production install also serves t
 
 The collector reads the host protocol and service tables. A registered OAuth client can add names on top of those tables. The additions are stored in the database for that client only. They are applied after the host tables, and a name the host already has keeps the host value when a client looks one up. The API that reads and writes those additions is in the OpenAPI document. A client cannot store a file path there.
 
+The flow table looks up each flow through that API. The protocol column shows the official name beside the protocol number. The service column shows the official service name of the source port and the destination port. ICMP and ICMPv6 keep type and code in the port column and leave the service column empty.
+
 ## What stays on this machine
 
 Flow records describe who communicated with whom. They stay in the local SQLite file. VibeCollector does not phone home.

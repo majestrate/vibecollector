@@ -1,8 +1,11 @@
 import { useState, type ReactElement } from "react";
 import { useFilters } from "../filters";
 import { formatInZone } from "../filters";
+import { protocolText, serviceLabel, serviceText, useFlowLabels } from "../netdb";
 import { portText } from "../ports";
 import { asText, QueryBody, useGET } from "../query";
+
+const EMPTY_FLOWS: FlowRow[] = [];
 
 interface FlowRow {
   id: number | string;
@@ -35,6 +38,7 @@ interface FlowPage {
 /**
  * FlowsView is the keyset flow table for the shared filter set.
  * It pages 100 rows at a time. It does not keep a second copy of the range.
+ * Protocol and service names come from the signed-in client's lookup API.
  */
 export function FlowsView(): ReactElement {
   const { filters } = useFilters();
@@ -44,6 +48,8 @@ export function FlowsView(): ReactElement {
   const cursor = pageState.cursors[pageState.page] ?? "";
   const [showEstimate, setShowEstimate] = useState(false);
   const query = useGET<FlowPage>("/flows", { limit: "100", cursor: cursor || undefined });
+  const flows = query.data?.flows ?? EMPTY_FLOWS;
+  const labels = useFlowLabels(flows);
 
   function goNext(): void {
     const next = query.data?.next_cursor;
@@ -73,6 +79,7 @@ export function FlowsView(): ReactElement {
               <th>Source</th>
               <th>Destination</th>
               <th>Ports</th>
+              <th>Service</th>
               <th>Proto</th>
               <th>Packets</th>
               <th>Octets</th>
@@ -82,26 +89,38 @@ export function FlowsView(): ReactElement {
             </tr>
           </thead>
           <tbody>
-            {(query.data?.flows ?? []).map((flow) => (
-              <tr key={String(flow.id)}>
-                <td>{wall(flow.start, filters.tz)}</td>
-                <td>
-                  <Address addr={flow.src} scope={flow.src_scope} />
-                </td>
-                <td>
-                  <Address addr={flow.dst} scope={flow.dst_scope} />
-                </td>
-                <td>{portText(flow.proto, flow.src_port, flow.dst_port)}</td>
-                <td>{flow.proto ?? ""}</td>
-                <td>{asText(flow.packets)}</td>
-                <td>{asText(flow.octets)}</td>
-                {showEstimate ? <td>{estimate(flow)}</td> : null}
-                <td>{flow.exporter}</td>
-                <td>
-                  <Badges flow={flow} />
-                </td>
-              </tr>
-            ))}
+            {flows.map((flow) => {
+              const protoName = flow.proto == null ? undefined : labels.protocols.get(flow.proto);
+              const icmp = flow.proto === 1 || flow.proto === 58;
+              return (
+                <tr key={String(flow.id)}>
+                  <td>{wall(flow.start, filters.tz)}</td>
+                  <td>
+                    <Address addr={flow.src} scope={flow.src_scope} />
+                  </td>
+                  <td>
+                    <Address addr={flow.dst} scope={flow.dst_scope} />
+                  </td>
+                  <td>{portText(flow.proto, flow.src_port, flow.dst_port)}</td>
+                  <td>
+                    {icmp
+                      ? ""
+                      : serviceText(
+                          serviceLabel(labels, flow.src_port, protoName),
+                          serviceLabel(labels, flow.dst_port, protoName),
+                        )}
+                  </td>
+                  <td>{protocolText(flow.proto, protoName)}</td>
+                  <td>{asText(flow.packets)}</td>
+                  <td>{asText(flow.octets)}</td>
+                  {showEstimate ? <td>{estimate(flow)}</td> : null}
+                  <td>{flow.exporter}</td>
+                  <td>
+                    <Badges flow={flow} />
+                  </td>
+                </tr>
+              );
+            })}
           </tbody>
         </table>
         {query.data && query.data.flows.length === 0 ? <p>No flows in this range.</p> : null}
