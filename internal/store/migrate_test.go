@@ -24,8 +24,8 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	if got := db.pool.Stats().MaxOpenConnections; got != 4 {
 		t.Fatalf("MaxOpenConnections = %d, want 4", got)
 	}
-	if v := userVersion(t, db); v != 2 {
-		t.Fatalf("user_version = %d, want 2", v)
+	if v := userVersion(t, db); v != 3 {
+		t.Fatalf("user_version = %d, want 3", v)
 	}
 	var name string
 	if err := db.pool.QueryRow(`SELECT name FROM schema_migrations WHERE version = 1`).Scan(&name); err != nil {
@@ -40,12 +40,18 @@ func TestOpenAppliesMigrations(t *testing.T) {
 	if name != "002_oauth_clients.sql" {
 		t.Fatalf("migration name %q", name)
 	}
+	if err := db.pool.QueryRow(`SELECT name FROM schema_migrations WHERE version = 3`).Scan(&name); err != nil {
+		t.Fatal(err)
+	}
+	if name != "003_client_netdb.sql" {
+		t.Fatalf("migration name %q", name)
+	}
 	var n int
 	if err := db.pool.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("schema_migrations rows = %d, want 2", n)
+	if n != 3 {
+		t.Fatalf("schema_migrations rows = %d, want 3", n)
 	}
 
 	for _, table := range []string{
@@ -61,6 +67,8 @@ func TestOpenAppliesMigrations(t *testing.T) {
 		"geo_path_5m",
 		"geo_path_other_5m",
 		"oauth_client",
+		"client_protocol",
+		"client_service",
 	} {
 		if !objectExists(t, db, "table", table) {
 			t.Errorf("missing table %s", table)
@@ -116,11 +124,11 @@ func TestReopenDoesNotReapply(t *testing.T) {
 	if err := db.pool.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("schema_migrations rows = %d, want 2", n)
+	if n != 3 {
+		t.Fatalf("schema_migrations rows = %d, want 3", n)
 	}
-	if v := userVersion(t, db); v != 2 {
-		t.Fatalf("user_version = %d, want 2", v)
+	if v := userVersion(t, db); v != 3 {
+		t.Fatalf("user_version = %d, want 3", v)
 	}
 }
 
@@ -134,29 +142,29 @@ func TestFailedMigrationLeavesPriorVersion(t *testing.T) {
 	// In memory, not the next NNN_*.sql file. A broken migration committed to the
 	// tree would make the next open refuse to start.
 	err = applyMigrations(db.pool, []migration{{
-		version: 3,
-		name:    "003_bad.sql",
+		version: 4,
+		name:    "004_bad.sql",
 		sql:     "CREATE TABLE should_roll_back (id INTEGER PRIMARY KEY);\nINSERT INTO should_roll_back (id) VALUES (1);\nNOT VALID SQL;\n",
 	}})
 	if err == nil {
 		t.Fatal("expected migration error")
 	}
-	if v := userVersion(t, db); v != 2 {
-		t.Fatalf("user_version = %d, want 2", v)
+	if v := userVersion(t, db); v != 3 {
+		t.Fatalf("user_version = %d, want 3", v)
 	}
 	var n int
 	if err := db.pool.QueryRow(`SELECT count(*) FROM schema_migrations`).Scan(&n); err != nil {
 		t.Fatal(err)
 	}
-	if n != 2 {
-		t.Fatalf("schema_migrations rows = %d, want 2", n)
+	if n != 3 {
+		t.Fatalf("schema_migrations rows = %d, want 3", n)
 	}
-	var version3 int
-	if err := db.pool.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = 3`).Scan(&version3); err != nil {
+	var version4 int
+	if err := db.pool.QueryRow(`SELECT count(*) FROM schema_migrations WHERE version = 4`).Scan(&version4); err != nil {
 		t.Fatal(err)
 	}
-	if version3 != 0 {
-		t.Fatalf("version 3 recorded %d times", version3)
+	if version4 != 0 {
+		t.Fatalf("version 4 recorded %d times", version4)
 	}
 	if objectExists(t, db, "table", "should_roll_back") {
 		t.Fatal("failed migration left should_roll_back")
@@ -170,8 +178,8 @@ func TestFailedMigrationLeavesPriorVersion(t *testing.T) {
 		t.Fatal(err)
 	}
 	t.Cleanup(func() { db.pool.Close() })
-	if v := userVersion(t, db); v != 2 {
-		t.Fatalf("user_version after reopen = %d, want 2", v)
+	if v := userVersion(t, db); v != 3 {
+		t.Fatalf("user_version after reopen = %d, want 3", v)
 	}
 	if objectExists(t, db, "table", "should_roll_back") {
 		t.Fatal("rolled-back table reappeared")

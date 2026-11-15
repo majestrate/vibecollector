@@ -25,7 +25,10 @@ var migrationFS embed.FS
 
 // DB is the opened pool. Writer, Sweeper, and Query use it. PutOAuthClient,
 // DeleteOAuthClient, ListOAuthClients, and OAuthSecretOK are the credential
-// directory. Callers do not run SQL on DB.
+// directory. CreateClientProtocol, UpdateClientProtocol, DeleteClientProtocol,
+// GetClientProtocol, ListClientProtocols, and the matching ClientService
+// methods are that client's additive protocol and service rows.
+// Callers do not run SQL on DB.
 type DB struct {
 	pool *sql.DB
 	// shedRaw is set by Sweeper when the database volume is under 5 GiB free.

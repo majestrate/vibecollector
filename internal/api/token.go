@@ -11,10 +11,12 @@ import (
 )
 
 // accessRec is one opaque bearer. family is empty for client-credentials tokens.
+// clientID is the oauth client the bearer was issued to.
 // exp is the instant the bearer stops being accepted.
 type accessRec struct {
-	exp    time.Time
-	family string
+	exp      time.Time
+	family   string
+	clientID string
 }
 
 // refreshRec is one opaque refresh token. successor is the hash key of the
@@ -52,6 +54,14 @@ func (s *Server) refreshTTL() time.Duration {
 }
 
 func (s *Server) validToken(tok string) bool {
+	_, ok := s.bearerClient(tok)
+	return ok
+}
+
+// bearerClient returns the oauth client stored on a live access token.
+// tok is the raw bearer. An unknown, expired, or client-less token returns
+// ok false. The comparison does not stop early on a missing token.
+func (s *Server) bearerClient(tok string) (string, bool) {
 	sum := sha256.Sum256([]byte(tok))
 	key := hex.EncodeToString(sum[:])
 	s.mu.Lock()
@@ -62,10 +72,10 @@ func (s *Server) validToken(tok string) bool {
 		stored = sha256.Sum256(nil)
 	}
 	match := subtle.ConstantTimeCompare(sum[:], stored[:]) == 1
-	if !ok || !match || !time.Now().Before(rec.exp) {
-		return false
+	if !ok || !match || !time.Now().Before(rec.exp) || rec.clientID == "" {
+		return "", false
 	}
-	return true
+	return rec.clientID, true
 }
 
 // issuePair mints an access token and a refresh token for a new family.
@@ -81,7 +91,7 @@ func (s *Server) issuePair(clientID string) tokenResult {
 	defer s.mu.Unlock()
 	now := time.Now()
 	s.sweepLocked(now)
-	access, secs, aerr := s.mintAccessLocked(now, family)
+	access, secs, aerr := s.mintAccessLocked(now, family, clientID)
 	if aerr != nil {
 		return tokenResult{status: http.StatusInternalServerError, code: "server_error"}
 	}
@@ -94,14 +104,14 @@ func (s *Server) issuePair(clientID string) tokenResult {
 }
 
 // issueAccess mints an opaque access token with no refresh token.
-// This is the client-credentials grant. RFC 6749 says that grant should not
-// receive a refresh token.
-func (s *Server) issueAccess() tokenResult {
+// clientID is stored on the bearer. This is the client-credentials grant.
+// RFC 6749 says that grant should not receive a refresh token.
+func (s *Server) issueAccess(clientID string) tokenResult {
 	s.mu.Lock()
 	defer s.mu.Unlock()
 	now := time.Now()
 	s.sweepLocked(now)
-	access, secs, err := s.mintAccessLocked(now, "")
+	access, secs, err := s.mintAccessLocked(now, "", clientID)
 	if err != nil {
 		return tokenResult{status: http.StatusInternalServerError, code: "server_error"}
 	}
@@ -135,7 +145,7 @@ func (s *Server) redeemRefresh(raw, clientID string) tokenResult {
 	if rec.clientID != clientID || !now.Before(rec.exp) {
 		return tokenResult{status: http.StatusBadRequest, code: "invalid_grant"}
 	}
-	access, secs, err := s.mintAccessLocked(now, rec.family)
+	access, secs, err := s.mintAccessLocked(now, rec.family, rec.clientID)
 	if err != nil {
 		return tokenResult{status: http.StatusInternalServerError, code: "server_error"}
 	}
@@ -154,7 +164,7 @@ type opaque struct {
 	key string
 }
 
-func (s *Server) mintAccessLocked(now time.Time, family string) (opaque, int, error) {
+func (s *Server) mintAccessLocked(now time.Time, family, clientID string) (opaque, int, error) {
 	raw, key, err := newOpaque()
 	if err != nil {
 		return opaque{}, 0, err
@@ -166,7 +176,7 @@ func (s *Server) mintAccessLocked(now time.Time, family string) (opaque, int, er
 		secs = 1
 		exp = now.Add(time.Second)
 	}
-	s.access[key] = accessRec{exp: exp, family: family}
+	s.access[key] = accessRec{exp: exp, family: family, clientID: clientID}
 	return opaque{raw: raw, key: key}, secs, nil
 }
 

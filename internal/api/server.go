@@ -165,6 +165,7 @@ func (s *Server) routes() {
 	} {
 		s.mux.HandleFunc("GET "+s.prefix+"/"+name, s.route(name))
 	}
+	s.netdbRoutes()
 	if s.ui != nil {
 		s.mux.Handle("/", s.uiHandler())
 	}
@@ -725,7 +726,7 @@ func (s *Server) tokenClient(w http.ResponseWriter, r *http.Request) {
 	if !s.clientSecretOK(w, r, id, secret, viaHeader) {
 		return
 	}
-	res := s.issueAccess()
+	res := s.issueAccess(id)
 	if res.status != http.StatusOK {
 		oauthErr(w, res.status, res.code)
 		return

@@ -2615,7 +2615,9 @@ The UI's `fetch` is same-origin and sends no `Authorization` header. It does not
 
 ## API
 
-Base URL is the HTTP listener. JSON only. All routes are `GET`. There is no write API. SQL text is constant and lives in `store.Query`. Every filter value is a bound parameter. The cursor string is decoded to two integers and those integers are bound; they are not concatenated into the SQL. `query.go` does not import `net/http`. The handler in `api.Server` parses the URL into `store.Filter` and calls `Cache.Do`. The load function calls one `Query` method and encodes the body, and it returns `FilterError` so the 400 is not stored.
+Base URL is the HTTP listener. JSON only. The nine flow and aggregate routes are `GET`. There is no write API for collected flows. SQL text for those reads is constant and lives in `store.Query`. Every filter value is a bound parameter. The cursor string is decoded to two integers and those integers are bound; they are not concatenated into the SQL. `query.go` does not import `net/http`. The handler in `api.Server` parses the URL into `store.Filter` and calls `Cache.Do`. The load function calls one `Query` method and encodes the body, and it returns `FilterError` so the 400 is not stored.
+
+Protocol and service names are the write exception. Each registered OAuth client has additive rows in `client_protocol` and `client_service`. The bearer token's client is the only scope. The URL does not carry a client id. `GET` and `POST /api/v1/protocols`, `GET`, `PUT`, and `DELETE /api/v1/protocols/{name}`, and the same shape for `/api/v1/services` and `/api/v1/services/{name}/{transport}` read and write that client's rows. `GET /api/v1/protocol` and `GET /api/v1/service` resolve a name or number through `netdb.Load` of a `store.NetFS`. That filesystem opens only `etc/protocols` and `etc/services`. It reads the host file, then appends the client's rows. A row is a name, a number or port, a protocol token, and aliases. A path is rejected and is not a column. The host entry wins when that official name is already in the host file. Deleting the OAuth client deletes its rows. The public client `vibecollector-ui` can write a row only after it has an `oauth_client` row.
 
 | Route | Used by | Reads |
 | --- | --- | --- |
@@ -2628,6 +2630,14 @@ Base URL is the HTTP listener. JSON only. All routes are `GET`. There is no writ
 | `GET /api/v1/asns` | ASN view | `asn_1m`, `asn_names`, or `flows` |
 | `GET /api/v1/reputation` | reputation view | `rep_1m`, or `flows` |
 | `GET /api/v1/geo` | **map and globe** | `geo_country_5m`, `geo_path_5m`, or `flows` |
+| `GET`/`POST /api/v1/protocols` | this client's protocol additions | `client_protocol` |
+| `GET`/`PUT`/`DELETE /api/v1/protocols/{name}` | one protocol addition | `client_protocol` |
+| `GET /api/v1/protocol` | host protocols, then this client's rows | host file and `client_protocol` |
+| `GET`/`POST /api/v1/services` | this client's service additions | `client_service` |
+| `GET`/`PUT`/`DELETE /api/v1/services/{name}/{transport}` | one service addition | `client_service` |
+| `GET /api/v1/service` | host services, then this client's rows | host file and `client_service` |
+
+The protocol and service routes do not take the flow filter parameters below. They require the same bearer scope `read`. `Cache-Control` on those responses is `no-store`.
 
 ### Common parameters
 
@@ -2861,7 +2871,7 @@ file:vibecollector.db?_pragma=journal_mode(WAL)&_pragma=busy_timeout(5000)&_prag
 
 `go.mod` requires `modernc.org/sqlite` v1.62.0 and the same `modernc.org/libc` version that v1.62.0's `go.mod` requires. Libc is not left as a floating transitive module.
 
-Migrations: `internal/store/migrations/001_init.sql` is the DDL in this section, including `flow_direction`, `octet_semantics`, and `clock_clamped`. The runner applies each file in one transaction and inserts into `schema_migrations`. A failure rolls that version back and the process exits without serving. Re-opening is a no-op when the version is present. `PRAGMA user_version` is set to the same integer. There are no down migrations. Later pull requests add a new `002_*.sql` only for a change discovered after 001 has merged. They do not edit a merged 001.
+Migrations: `internal/store/migrations/001_init.sql` is the DDL in this section, including `flow_direction`, `octet_semantics`, and `clock_clamped`. The runner applies each file in one transaction and inserts into `schema_migrations`. A failure rolls that version back and the process exits without serving. Re-opening is a no-op when the version is present. `PRAGMA user_version` is set to the same integer. There are no down migrations. Later pull requests add a new `NNN_*.sql` only for a change discovered after 001 has merged. They do not edit a merged 001. `002_oauth_clients.sql` stores OAuth clients. `003_client_netdb.sql` stores each client's additive protocol and service rows. Those tables reference `oauth_client` and delete their rows with the client. They have no filesystem path column.
 
 ```sql
 CREATE TABLE schema_migrations (

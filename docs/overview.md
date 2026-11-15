@@ -54,6 +54,10 @@ The map and the globe draw the same geographic aggregate. World geometry ships w
 
 The daemon serves the API behind these views. A production install also serves the built UI from the daemon. During development the UI runs through pnpm and talks to that API.
 
+## Protocol and service names
+
+The collector reads the host protocol and service tables. A registered OAuth client can add names on top of those tables. The additions are stored in the database for that client only. They are applied after the host tables, and a name the host already has keeps the host value when a client looks one up. The API that reads and writes those additions is in the OpenAPI document. A client cannot store a file path there.
+
 ## What stays on this machine
 
 Flow records describe who communicated with whom. They stay in the local SQLite file. VibeCollector does not phone home.

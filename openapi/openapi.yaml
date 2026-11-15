@@ -5,6 +5,11 @@ info:
   description: |
     JSON API for the VibeCollector NetFlow collector.
     Collected flows and aggregates are read with GET. There is no write API for them.
+    Each bearer client may add protocol and service names of its own.
+    Those rows are stored for that client and applied after the host tables.
+    The database stores the name, number or port, protocol token, and aliases.
+    It does not store a filesystem path.
+    When the host table already has the official name, lookup keeps the host entry.
 
     Access tokens travel only in the `Authorization: Bearer` header.
     The query string is not a token channel.
@@ -12,8 +17,9 @@ info:
     A missing or rejected token is 401 on every bind, including loopback.
 
     The REST mount is `http.api_prefix`, default `/api/v1`.
-    The nine data paths in this document use that default.
-    When the daemon serves this document it rewrites those `/api/v1` path keys
+    The nine flow paths in this document use that default, as do the protocol
+    and service override paths.
+    When the daemon serves this document it rewrites every `/api/v1` path key
     to the configured prefix, under the path of `http.public_host`.
     `/oauth/authorize`, `/oauth/token`, and `/openapi.json` are mounted on that
     same path. An empty public path leaves them at the site root.
@@ -49,6 +55,10 @@ tags:
     description: OAuth 2.0 authorization code with PKCE, refresh tokens, and client credentials.
   - name: discovery
     description: This API document.
+  - name: netdb
+    description: |
+      Additive protocol and service names for the bearer client.
+      Rows are applied after the host tables. A host name keeps the host value on lookup.
 security:
   - oauth2: [read]
 paths:
@@ -714,6 +724,347 @@ paths:
         "503":
           $ref: "#/components/responses/QueryTimeout"
 
+  /api/v1/protocols:
+    get:
+      tags: [netdb]
+      operationId: listProtocols
+      summary: List this client's protocol additions
+      description: |
+        Returns the protocol rows stored for the client on the bearer token.
+        It does not return the host protocol table and it does not return another client's rows.
+      security: [{ oauth2: [read] }]
+      responses:
+        "200":
+          description: This client's protocol additions, ordered by name. Empty when the client has none.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolOverrideList"
+              example:
+                protocols: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [netdb]
+      operationId: createProtocol
+      summary: Add a protocol name for this client
+      description: |
+        Inserts one protocol row for the bearer client.
+        `name` is the official name. `number` is the decimal protocol number.
+        `aliases` omitted, null, or `[]` stores no aliases.
+        A duplicate name for this client is 409. The client must be a registered OAuth client.
+        A path, a dot-dot segment, or any field other than `name`, `number`, and `aliases` is 400.
+      security: [{ oauth2: [read] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProtocolOverride"
+            example:
+              name: vc-extra
+              number: 254
+              aliases: [VX]
+      responses:
+        "201":
+          description: The row that was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/NetExists"
+
+  /api/v1/protocols/{name}:
+    get:
+      tags: [netdb]
+      operationId: getProtocol
+      summary: Read one protocol addition
+      description: |
+        Returns the bearer client's row for `name`.
+        A name that exists only in the host table is 404.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ProtocolName"
+      responses:
+        "200":
+          description: The stored row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolOverride"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+    put:
+      tags: [netdb]
+      operationId: putProtocol
+      summary: Replace the number and aliases of a protocol addition
+      description: |
+        `name` in the path selects the row. The body supplies the new number and aliases.
+        The official name does not change. A missing row is 404.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ProtocolName"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ProtocolOverrideUpdate"
+            example:
+              number: 253
+              aliases: [V2]
+      responses:
+        "200":
+          description: The updated row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+    delete:
+      tags: [netdb]
+      operationId: deleteProtocol
+      summary: Delete one protocol addition
+      description: |
+        Removes the bearer client's row for `name`. The host table is unchanged.
+        A missing row is 404.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ProtocolName"
+      responses:
+        "204":
+          description: The row was removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+
+  /api/v1/protocol:
+    get:
+      tags: [netdb]
+      operationId: lookupProtocol
+      summary: Resolve a protocol name or number
+      description: |
+        Loads the host protocol table, then appends the bearer client's rows.
+        Supply `name` or `number`, not both.
+        The first entry in that combined table wins. A host name keeps the host number.
+        A client name that the host does not have is visible to this client only.
+        An empty result is 404.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - name: name
+          in: query
+          required: false
+          description: Official name or alias, compared exactly.
+          schema:
+            type: string
+        - name: number
+          in: query
+          required: false
+          description: Decimal protocol number. Used when `name` is absent.
+          schema:
+            type: integer
+            minimum: 0
+      responses:
+        "200":
+          description: The first matching entry from the host table plus this client's rows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ProtocolOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+
+  /api/v1/services:
+    get:
+      tags: [netdb]
+      operationId: listServices
+      summary: List this client's service additions
+      description: |
+        Returns the service rows stored for the bearer client, ordered by name and then protocol.
+        It does not return the host service table.
+      security: [{ oauth2: [read] }]
+      responses:
+        "200":
+          description: This client's service additions. Empty when the client has none.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceOverrideList"
+              example:
+                services: []
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+    post:
+      tags: [netdb]
+      operationId: createService
+      summary: Add a service name for this client
+      description: |
+        Inserts one service row for the bearer client.
+        `protocol` is the protocol token, such as `tcp`, not a filesystem path.
+        A duplicate name and protocol for this client is 409.
+        A path or any field other than `name`, `port`, `protocol`, and `aliases` is 400.
+      security: [{ oauth2: [read] }]
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceOverride"
+            example:
+              name: vc-extra
+              port: 59999
+              protocol: udp
+              aliases: [vc-echo]
+      responses:
+        "201":
+          description: The row that was stored.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "409":
+          $ref: "#/components/responses/NetExists"
+
+  /api/v1/services/{name}/{transport}:
+    get:
+      tags: [netdb]
+      operationId: getService
+      summary: Read one service addition
+      description: |
+        Returns the bearer client's row for `name` and `transport`.
+        A name that exists only in the host table is 404.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ServiceName"
+        - $ref: "#/components/parameters/ServiceTransport"
+      responses:
+        "200":
+          description: The stored row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceOverride"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+    put:
+      tags: [netdb]
+      operationId: putService
+      summary: Replace the port and aliases of a service addition
+      description: |
+        `name` and `transport` select the row. The body supplies the new port and aliases.
+        The official name and protocol token do not change.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ServiceName"
+        - $ref: "#/components/parameters/ServiceTransport"
+      requestBody:
+        required: true
+        content:
+          application/json:
+            schema:
+              $ref: "#/components/schemas/ServiceOverrideUpdate"
+            example:
+              port: 59998
+              aliases: []
+      responses:
+        "200":
+          description: The updated row.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+    delete:
+      tags: [netdb]
+      operationId: deleteService
+      summary: Delete one service addition
+      description: |
+        Removes the bearer client's row for `name` and `transport`. The host table is unchanged.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - $ref: "#/components/parameters/ServiceName"
+        - $ref: "#/components/parameters/ServiceTransport"
+      responses:
+        "204":
+          description: The row was removed.
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+
+  /api/v1/service:
+    get:
+      tags: [netdb]
+      operationId: lookupService
+      summary: Resolve a service name or port
+      description: |
+        Loads the host service table, then appends the bearer client's rows.
+        Supply `name` or `port`, not both. `protocol` may be empty, which selects
+        the earliest entry for that name or port. A host name and protocol keep the host port.
+      security: [{ oauth2: [read] }]
+      parameters:
+        - name: name
+          in: query
+          required: false
+          description: Official name or alias, compared exactly.
+          schema:
+            type: string
+        - name: port
+          in: query
+          required: false
+          description: Port in host order. Used when `name` is absent.
+          schema:
+            type: integer
+            minimum: 0
+            maximum: 65535
+        - name: protocol
+          in: query
+          required: false
+          description: Protocol token, such as `tcp`. Empty selects the earliest entry.
+          schema:
+            type: string
+      responses:
+        "200":
+          description: The first matching entry from the host table plus this client's rows.
+          content:
+            application/json:
+              schema:
+                $ref: "#/components/schemas/ServiceOverride"
+        "400":
+          $ref: "#/components/responses/NetBadRequest"
+        "401":
+          $ref: "#/components/responses/Unauthorized"
+        "404":
+          $ref: "#/components/responses/NetAbsent"
+
   /oauth/authorize:
     get:
       tags: [oauth]
@@ -1250,6 +1601,38 @@ components:
         minimum: 0
         maximum: 100
         default: 100
+    ProtocolName:
+      name: name
+      in: path
+      required: true
+      description: |
+        Official protocol name stored for this client.
+        One token. A slash or a dot-dot path is rejected.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._+-]+$"
+    ServiceName:
+      name: name
+      in: path
+      required: true
+      description: Official service name stored for this client.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._+-]+$"
+    ServiceTransport:
+      name: transport
+      in: path
+      required: true
+      description: Protocol token stored with the service name, such as `tcp`.
+      schema:
+        type: string
+        minLength: 1
+        maxLength: 64
+        pattern: "^[A-Za-z0-9._+-]+$"
   responses:
     Unauthorized:
       description: |
@@ -1257,6 +1640,42 @@ components:
         Tokens are accepted only as `Authorization: Bearer`.
         The query string is not a token channel.
         This status is returned on every bind, including loopback.
+    NetBadRequest:
+      description: |
+        `bad_request`. The body or query was rejected, or the client is not registered.
+        A filesystem path is not a field and is not stored.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NetBadRequest"
+          example:
+            error: bad_request
+    NetExists:
+      description: This client already has that protocol name, or that service name and protocol.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NetExists"
+          example:
+            error: exists
+    NetAbsent:
+      description: |
+        `not_found`. This client has no such row, or the combined table has no match.
+        Another client's row is not visible here.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NetAbsent"
+          example:
+            error: not_found
+    NetServer:
+      description: The override could not be read or written.
+      content:
+        application/json:
+          schema:
+            $ref: "#/components/schemas/NetServer"
+          example:
+            error: server_error
     BadRange:
       description: |
         `bad_range`. The day, timezone, or range cannot be resolved,
@@ -1354,6 +1773,135 @@ components:
         status:
           type: string
           enum: [ok]
+    NetToken:
+      type: string
+      minLength: 1
+      maxLength: 64
+      pattern: "^[A-Za-z0-9._+-]+$"
+      description: |
+        One protocols or services file token.
+        Letters, digits, and `-`, `_`, `+`, `.` only.
+        `.` and `..` are rejected. A slash, backslash, space, or colon is rejected.
+    ProtocolOverride:
+      type: object
+      additionalProperties: false
+      required: [name, number]
+      properties:
+        name:
+          allOf:
+            - $ref: "#/components/schemas/NetToken"
+          description: Official protocol name.
+        number:
+          type: integer
+          minimum: 0
+          maximum: 255
+          description: Decimal protocol number.
+        aliases:
+          type: array
+          description: |
+            Names after the official name, in file order.
+            Omitted, null, or empty stores no aliases.
+            An alias equal to the official name, or a repeated alias, is rejected.
+          items:
+            $ref: "#/components/schemas/NetToken"
+    ProtocolOverrideUpdate:
+      type: object
+      additionalProperties: false
+      required: [number]
+      properties:
+        number:
+          type: integer
+          minimum: 0
+          maximum: 255
+        aliases:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetToken"
+    ProtocolOverrideList:
+      type: object
+      additionalProperties: false
+      required: [protocols]
+      properties:
+        protocols:
+          type: array
+          items:
+            $ref: "#/components/schemas/ProtocolOverride"
+    ServiceOverride:
+      type: object
+      additionalProperties: false
+      required: [name, port, protocol]
+      properties:
+        name:
+          allOf:
+            - $ref: "#/components/schemas/NetToken"
+          description: Official service name.
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+          description: Port in host order.
+        protocol:
+          allOf:
+            - $ref: "#/components/schemas/NetToken"
+          description: Protocol token from the services file, such as `tcp`.
+        aliases:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetToken"
+    ServiceOverrideUpdate:
+      type: object
+      additionalProperties: false
+      required: [port]
+      properties:
+        port:
+          type: integer
+          minimum: 0
+          maximum: 65535
+        aliases:
+          type: array
+          items:
+            $ref: "#/components/schemas/NetToken"
+    ServiceOverrideList:
+      type: object
+      additionalProperties: false
+      required: [services]
+      properties:
+        services:
+          type: array
+          items:
+            $ref: "#/components/schemas/ServiceOverride"
+    NetBadRequest:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [bad_request]
+    NetExists:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [exists]
+    NetAbsent:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [not_found]
+    NetServer:
+      type: object
+      additionalProperties: false
+      required: [error]
+      properties:
+        error:
+          type: string
+          enum: [server_error]
     Stats:
       type: object
       additionalProperties: false
